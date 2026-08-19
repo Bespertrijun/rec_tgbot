@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"id": 101, "user_id": "u-1001", "email": "alice@example.com", "account_id": 4949, "total_usage_usd": "712.1697491500"},
+    {"id": 102, "user_id": "u-1002", "email": "bob@example.com", "account_id": null, "total_usage_usd": "145.0000000000"}
+  ]
+}

@@ -1,0 +1,56 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Source-control and CI metadata
+.git/
+.gitignore
+.github/
+
+# Local Python/build/test artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime data, Cookies, databases, dumps, backups, and logs
+data/
+cookies/
+*.cookie
+*.cookies
+*cookie*.json
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+*.backup
+backups/
+logs/
+*.log
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+id_rsa*
+id_ed25519*
+
+# Tests and operator documentation are not part of the runtime image
+tests/
+docs/

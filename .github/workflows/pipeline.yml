@@ -1,0 +1,219 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/bespertrijun/rec_tgbot
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }} checks
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests with coverage
+        run: python -m pytest --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Lint with Ruff
+        run: python -m ruff check .
+
+      - name: Type-check with Mypy
+        run: python -m mypy src tests
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests alembic
+
+      - name: Validate production Compose with safe placeholders
+        env:
+          COMPOSE_PROJECT_NAME: reclaude-ci
+        run: |
+          set -eu
+          ci_env="${RUNNER_TEMP}/reclaude.env"
+          umask 077
+          cat > "${ci_env}" <<'EOF'
+          POSTGRES_DB=reclaude
+          POSTGRES_USER=bot
+          POSTGRES_PASSWORD=ci-only-placeholder
+          TELEGRAM_BOT_TOKEN=ci-only-placeholder
+          TELEGRAM_ADMIN_IDS=1
+          DATABASE_URL=postgresql+asyncpg://bot:ci-only-placeholder@db:5432/reclaude
+          RECLAUDE_ACCOUNT_EMAIL_MASKED=ci-only-placeholder
+          RECLAUDE_SESSION_COOKIE=ci-only-placeholder
+          EOF
+          # Compose's env_file is intentionally named .env in production. Keep this
+          # CI-only copy temporary; it is never uploaded or published.
+          cp "${ci_env}" .env
+          trap 'rm -f .env' EXIT
+          docker compose --env-file "${ci_env}" -f docker-compose.prod.yml config --quiet
+
+  secret-scan:
+    name: Scan repository for leaked secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan (repository only)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  docker-build:
+    name: Build Docker image
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Publish image to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [quality, secret-scan, docker-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push SHA and latest tags
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      IMAGE_TAG: ghcr.io/bespertrijun/rec_tgbot:sha-${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH identity and known hosts
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "${HOME}/.ssh/deploy_key"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/deploy_key" "${HOME}/.ssh/known_hosts"
+
+      - name: Upload production Compose only
+        run: |
+          set -eu
+          ssh_args=(
+            -p "${DEPLOY_PORT}"
+            -i "${HOME}/.ssh/deploy_key"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+          )
+          scp_args=(
+            -P "${DEPLOY_PORT}"
+            -i "${HOME}/.ssh/deploy_key"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+          )
+          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "mkdir -p -- '${DEPLOY_PATH}' && test -f '${DEPLOY_PATH}/.env'"
+          scp "${scp_args[@]}" docker-compose.prod.yml \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.prod.yml.new"
+          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -eu; cd -- '${DEPLOY_PATH}'; test -f .env; mv -f -- docker-compose.prod.yml.new docker-compose.prod.yml"
+
+      - name: Pull, restart, and verify the bot remotely
+        run: |
+          set -eu
+          ssh_args=(
+            -p "${DEPLOY_PORT}"
+            -i "${HOME}/.ssh/deploy_key"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+          )
+          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -eu
+             cd -- '${DEPLOY_PATH}'
+             test -f .env
+             export BOT_IMAGE='${IMAGE_TAG}'
+             docker compose -f docker-compose.prod.yml pull bot
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans
+             sleep 5
+             running=\$(docker compose -f docker-compose.prod.yml ps --status running --services)
+             printf '%s\\n' \"\${running}\" | grep -Fxq bot"

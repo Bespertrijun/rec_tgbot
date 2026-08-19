@@ -1,0 +1,14 @@
+{
+  "current_account": {
+    "status": "bound",
+    "email_masked": "owner***@example.com",
+    "usage_updated_at": "2026-08-18T05:00:00Z",
+    "usage_snapshot": {
+    "limits": [
+      {"group": "weekly", "kind": "weekly_all", "scope": null, "percent": "42.50", "resets_at": "2026-08-25T05:00:00Z", "is_active": true},
+      {"group": "weekly", "kind": "other", "scope": null, "percent": "1", "resets_at": "2026-08-25T05:00:00Z", "is_active": false}
+    ],
+    "seven_day": {"utilization": "42.50", "resets_at": "2026-08-25T05:00:00Z"}
+    }
+  }
+}

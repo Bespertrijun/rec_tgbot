@@ -1,0 +1,60 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.venv/
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test, type-checker, linter, and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime data, Cookies, databases, dumps, and backups
+data/
+!data/
+data/*
+!data/cookies/
+data/cookies/*
+!data/cookies/.gitkeep
+cookies/
+*.cookie
+*.cookies
+*cookie*.json
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+*.backup
+backups/
+
+# Logs and local service output
+logs/
+*.log
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+id_rsa*
+id_ed25519*
+
+# OMX/OMC runtime state
+.omx/
+.omc/

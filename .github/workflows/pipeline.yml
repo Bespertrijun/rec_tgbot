@@ -65,8 +65,9 @@ jobs:
           TELEGRAM_BOT_TOKEN=ci-only-placeholder
           TELEGRAM_ADMIN_IDS=1
           DATABASE_URL=postgresql+asyncpg://bot:ci-only-placeholder@db:5432/reclaude
-          RECLAUDE_ACCOUNT_EMAIL_MASKED=ci-only-placeholder
-          RECLAUDE_SESSION_COOKIE=ci-only-placeholder
+          RECLAUDE_LOGIN_EMAIL=ci@example.invalid
+          RECLAUDE_LOGIN_PASSWORD=ci-only-password-placeholder
+          RECLAUDE_SESSION_COOKIE=
           EOF
           # Compose's env_file is intentionally named .env in production. Keep this
           # CI-only copy temporary; it is never uploaded or published.

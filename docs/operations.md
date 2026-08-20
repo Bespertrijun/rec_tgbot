@@ -9,9 +9,12 @@ members snapshot and cycle-baseline reconcile before enabling quota writes.
 
 ## Health gates
 
-The service fails closed when the account status is not `bound`, the configured account identity
-does not match, or a Cookie request returns `401`. No retry is attempted after
-the first `401` until the Cookie recovery runbook is completed.
+The service fails closed when the current account status is not `bound`, the `/accounts` response
+does not contain exactly one bound record whose health is non-empty and not `banned`, its
+`account_id` is missing or invalid, or a session request returns `401`. Account IDs are discovered
+afresh by `/account`; the
+record's separate database `id` is never used. No retry is attempted after the first `401` until
+the recovery runbook is completed.
 
 Quota writes also require a fresh `/members` snapshot. The default maximum age is 90 seconds;
 future-dated or older snapshots are ignored until the next normal members sync. Override this

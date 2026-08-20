@@ -4,7 +4,7 @@ from typing import Any
 
 from reclaude_bot.domain.errors import EligibilityError
 
-from .models import Member, MembersResponse, MeResponse
+from .models import AccountRecord, AccountsResponse, Member, MembersResponse, MeResponse
 
 
 class FakeReclaudeGateway:
@@ -14,7 +14,7 @@ class FakeReclaudeGateway:
         self,
         members: list[Member],
         me: MeResponse,
-        accounts: list[dict[str, Any]] | None = None,
+        accounts: list[AccountRecord | dict[str, Any]] | None = None,
         account_id: int | str | None = None,
     ) -> None:
         self.member_rows = {str(member.user_id): member for member in members}
@@ -37,14 +37,21 @@ class FakeReclaudeGateway:
         self.me_calls += 1
         return self.me_response
 
-    async def accounts(self) -> list[dict[str, Any]]:
+    async def authenticate(self) -> MeResponse:
+        return await self.me()
+
+    async def accounts(self) -> AccountsResponse:
         self.accounts_calls += 1
-        return list(self.account_rows)
+        return AccountsResponse.model_validate({"items": list(self.account_rows)})
 
     def configure_account_id(self, account_id: int | str) -> None:
         if isinstance(account_id, bool) or (isinstance(account_id, str) and not account_id.strip()):
             raise EligibilityError("Reclaude 账号 ID 无效")
         if not isinstance(account_id, (int, str)):
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if isinstance(account_id, int) and account_id <= 0:
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if isinstance(account_id, str) and (not account_id.strip().isdigit() or int(account_id.strip()) <= 0):
             raise EligibilityError("Reclaude 账号 ID 无效")
         self.account_id = account_id
 

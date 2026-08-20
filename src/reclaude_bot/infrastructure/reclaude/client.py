@@ -13,10 +13,11 @@ from uuid import uuid4
 
 import httpx
 import structlog
+from pydantic import SecretStr
 
 from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError, UpstreamError
 
-from .models import MembersResponse, MeResponse
+from .models import AccountsResponse, MembersResponse, MeResponse
 
 log = structlog.get_logger(__name__)
 
@@ -26,7 +27,8 @@ class ReclaudeGateway(Protocol):
 
     async def members(self) -> MembersResponse: ...
     async def me(self) -> MeResponse: ...
-    async def accounts(self) -> list[dict[str, Any]]: ...
+    async def authenticate(self) -> MeResponse: ...
+    async def accounts(self) -> AccountsResponse: ...
     def configure_account_id(self, account_id: int | str) -> None: ...
     async def assign(self, user_id: str | int) -> httpx.Response | None: ...
     async def revoke(self, user_id: str | int) -> httpx.Response | None: ...
@@ -67,6 +69,9 @@ class ReclaudeClient:
         org_id: int = 178,
         account_id: int | str | None = None,
         auth_alert_callback: Callable[[], Awaitable[None]] | None = None,
+        *,
+        login_email: str | None = None,
+        login_password: SecretStr | str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookie_jar_path = Path(cookie_jar_path) if cookie_jar_path else None
@@ -78,9 +83,19 @@ class ReclaudeClient:
         if account_id is not None:
             self.configure_account_id(account_id)
         self.auth_alert_callback = auth_alert_callback
+        self._login_email = (login_email or "").strip()
+        if isinstance(login_password, SecretStr):
+            password_value = login_password.get_secret_value()
+        else:
+            password_value = login_password or ""
+        if bool(self._login_email) != bool(password_value):
+            raise ValueError("RECLAUDE_LOGIN_EMAIL and RECLAUDE_LOGIN_PASSWORD must be configured together")
+        self._login_password = SecretStr(password_value)
         self._circuit_open = False
         self._alert_sent = False
         self._lock = asyncio.Lock()
+        self._auth_lock = asyncio.Lock()
+        self._session_available = False
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout, headers={"User-Agent": user_agent})
         try:
             self._load_cookies(session_cookie)
@@ -107,13 +122,25 @@ class ReclaudeClient:
                 log.warning("cookie_jar_load_failed", error=str(exc))
         cookies = jar_cookies if jar_valid else _parse_cookie_header(session_cookie)
         if not _has_session_cookie(cookies):
-            raise ValueError("no valid Reclaude session cookie is configured")
+            if not self._has_login_credentials:
+                raise ValueError("no valid Reclaude session cookie is configured")
+            return
         for name, value in cookies.items():
             self._client.cookies.set(name, value)
+        self._session_available = True
         if self.cookie_jar_path:
             self._persist_cookies()
 
-    def _persist_cookies(self) -> None:
+    @property
+    def _has_login_credentials(self) -> bool:
+        return bool(self._login_email and self._login_password.get_secret_value())
+
+    def _has_current_session_cookie(self) -> bool:
+        if self._client is None:
+            return False
+        return _has_session_cookie({str(name): str(value) for name, value in self._client.cookies.items()})
+
+    def _persist_cookies(self, *, required: bool = False) -> None:
         if not self.cookie_jar_path:
             return
         try:
@@ -132,6 +159,8 @@ class ReclaudeClient:
                 temp_path.unlink(missing_ok=True)
         except OSError as exc:
             log.warning("cookie_jar_persist_failed", error=str(exc))
+            if required:
+                raise UpstreamError("Reclaude session cookie could not be persisted") from exc
 
     async def close(self) -> None:
         if self._client is not None:
@@ -140,6 +169,8 @@ class ReclaudeClient:
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         if self._circuit_open:
             raise AuthenticationCircuitOpen("Reclaude authentication circuit is open")
+        if not self._session_available:
+            raise AuthenticationCircuitOpen("Reclaude session is unavailable; run recovery authentication")
         request_id = str(uuid4())
         started = time.monotonic()
         method_upper = method.upper()
@@ -147,6 +178,8 @@ class ReclaudeClient:
         async with self._lock:
             if self._circuit_open:
                 raise AuthenticationCircuitOpen("Reclaude authentication circuit is open")
+            if not self._session_available:
+                raise AuthenticationCircuitOpen("Reclaude session is unavailable; run recovery authentication")
             for attempt in range(attempts):
                 try:
                     response = await self._client.request(method_upper, path, **kwargs)
@@ -177,6 +210,89 @@ class ReclaudeClient:
                 return response
         raise UpstreamError("request lock exited without response")
 
+    async def authenticate(self) -> MeResponse:
+        """Validate the current session, or perform one explicit recovery login.
+
+        This method is intentionally called by the recovery workflow only. Ordinary API
+        methods never use configured credentials implicitly.
+        """
+
+        async with self._auth_lock:
+            if self._session_available and not self._circuit_open:
+                try:
+                    return await self.me()
+                except AuthenticationCircuitOpen:
+                    # The 401 path opens the circuit; use credentials below when available.
+                    pass
+            if not self._has_login_credentials:
+                raise AuthenticationCircuitOpen("Reclaude session is unavailable and login credentials are not configured")
+            return await self._login_and_verify()
+
+    async def _login_and_verify(self) -> MeResponse:
+        if not self._has_login_credentials:
+            raise AuthenticationCircuitOpen("Reclaude login credentials are not configured")
+        client = self._client
+        if client is None:
+            raise UpstreamError("Reclaude login client is unavailable")
+
+        # Login is a single explicit recovery attempt. Never retry or log its request body.
+        async with self._lock:
+            client.cookies.clear()
+            self._session_available = False
+            self._circuit_open = False
+            try:
+                response = await client.post(
+                    "/api/auth/login",
+                    json={"email": self._login_email, "password": self._login_password.get_secret_value()},
+                )
+            except httpx.HTTPError as exc:
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login request failed; retry recovery later") from exc
+
+            status = response.status_code
+            payload: Any = None
+            if response.content:
+                try:
+                    payload = response.json()
+                except (ValueError, TypeError):
+                    payload = None
+            if isinstance(payload, dict) and (
+                str(payload.get("step", "")).casefold() == "mfa_required" or payload.get("mfa_required") is True
+            ):
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login requires MFA; MFA recovery is not configured")
+            if status == 429:
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login is rate limited; retry recovery later")
+            if status in (401, 403):
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login credentials are invalid")
+            if status >= 500:
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login service is temporarily unavailable")
+            if status >= 400:
+                self._circuit_open = True
+                raise UpstreamError(f"Reclaude login failed with HTTP {status}")
+            if not self._has_current_session_cookie():
+                self._circuit_open = True
+                raise UpstreamError("Reclaude login did not establish a valid session")
+            self._session_available = True
+            try:
+                self._persist_cookies(required=True)
+            except UpstreamError:
+                self._session_available = False
+                self._circuit_open = True
+                raise
+
+        self._circuit_open = False
+        self._alert_sent = False
+        try:
+            return await self.me()
+        except AuthenticationCircuitOpen as exc:
+            raise UpstreamError("Reclaude login session verification failed") from exc
+        except (ValueError, TypeError) as exc:
+            raise UpstreamError("Reclaude login session verification returned invalid data") from exc
+
     async def members(self) -> MembersResponse:
         response = await self._request("GET", f"/api/app/orgs/{self.org_id}/members")
         return MembersResponse.model_validate(response.json())
@@ -185,21 +301,21 @@ class ReclaudeClient:
         response = await self._request("GET", "/api/app/me")
         return MeResponse.model_validate(response.json())
 
-    async def accounts(self) -> list[dict[str, Any]]:
+    async def accounts(self) -> AccountsResponse:
         response = await self._request("GET", f"/api/app/orgs/{self.org_id}/accounts")
-        payload = response.json()
-        if isinstance(payload, list):
-            return payload
-        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-            return payload["items"]
-        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-            return payload["data"]
-        raise UpstreamError("Reclaude accounts response has invalid shape")
+        try:
+            return AccountsResponse.model_validate(response.json())
+        except (TypeError, ValueError) as exc:
+            raise UpstreamError("Reclaude accounts response has invalid shape") from exc
 
     def configure_account_id(self, account_id: int | str) -> None:
         if isinstance(account_id, bool) or (isinstance(account_id, str) and not account_id.strip()):
             raise EligibilityError("Reclaude 账号 ID 无效")
         if not isinstance(account_id, (int, str)):
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if isinstance(account_id, int) and account_id <= 0:
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if isinstance(account_id, str) and (not account_id.strip().isdigit() or int(account_id.strip()) <= 0):
             raise EligibilityError("Reclaude 账号 ID 无效")
         self.account_id = account_id
 

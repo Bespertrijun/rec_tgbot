@@ -55,7 +55,21 @@ async def test_status_is_cache_only_and_used_uses_dynamic_limit(app_context):
 @pytest.mark.asyncio
 async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
     factory, gateway, settings = app_context
-    gateway.account_rows = [{"id": 8123, "email_masked": settings.reclaude_account_email_masked}]
+    gateway.account_rows = [
+        {
+            "id": 7022,
+            "account_email": "other@example.com",
+            "account_id": 8123,
+            "health": "degraded",
+            "lifecycle": "bound",
+            "org_id": 178,
+        }
+    ]
+    gateway.me_response = gateway.me_response.model_copy(
+        update={
+            "current_account": gateway.me_response.current_account.model_copy(update={"email_masked": "different***@example.com"}),
+        }
+    )
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
     quota = QuotaService(factory, gateway, settings)
@@ -77,15 +91,15 @@ async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
 async def test_recovery_rejects_multiple_accounts_without_configuring_id(app_context):
     factory, gateway, settings = app_context
     gateway.account_rows = [
-        {"id": 8123, "email_masked": settings.reclaude_account_email_masked},
-        {"id": 8124, "email_masked": settings.reclaude_account_email_masked},
+        {"id": 7022, "account_id": 8123, "health": "healthy", "lifecycle": "bound", "org_id": 178},
+        {"id": 7023, "account_id": 8124, "health": "healthy", "lifecycle": "bound", "org_id": 178},
     ]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
     quota = QuotaService(factory, gateway, settings)
     recovery = RecoveryService(gate, quota, gateway, settings)
 
-    with pytest.raises(EligibilityError, match="恰好为一个"):
+    with pytest.raises(EligibilityError, match="不唯一"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
@@ -93,15 +107,14 @@ async def test_recovery_rejects_multiple_accounts_without_configuring_id(app_con
 
 
 @pytest.mark.asyncio
-async def test_recovery_rejects_account_email_mismatch_without_configuring_id(app_context):
+async def test_recovery_rejects_zero_bound_accounts(app_context):
     factory, gateway, settings = app_context
-    gateway.account_rows = [{"id": 8123, "email_masked": "other***@example.com"}]
+    gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": "healthy", "lifecycle": "unbound", "org_id": 178}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
-    quota = QuotaService(factory, gateway, settings)
-    recovery = RecoveryService(gate, quota, gateway, settings)
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(EligibilityError, match="账号邮箱掩码不匹配"):
+    with pytest.raises(EligibilityError, match="没有可用的已绑定账号"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
@@ -109,23 +122,95 @@ async def test_recovery_rejects_account_email_mismatch_without_configuring_id(ap
 
 
 @pytest.mark.asyncio
-async def test_recovery_rejects_current_account_email_mismatch_without_configuring_id(app_context):
+@pytest.mark.parametrize("health", ["banned", " BANNED "])
+async def test_recovery_rejects_banned_account_health(app_context, health):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": health, "lifecycle": "bound", "org_id": 178}]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError, match="健康状态不可用"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_banned_current_account_before_discovery(app_context):
     factory, gateway, settings = app_context
     gateway.me_response = gateway.me_response.model_copy(
         update={
-            "current_account": gateway.me_response.current_account.model_copy(update={"email_masked": "other***@example.com"}),
+            "current_account": gateway.me_response.current_account.model_copy(update={"status": "banned"}),
         }
     )
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
-    quota = QuotaService(factory, gateway, settings)
-    recovery = RecoveryService(gate, quota, gateway, settings)
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(EligibilityError, match="当前账号邮箱掩码不匹配"):
+    with pytest.raises(EligibilityError, match="当前账号未绑定"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.accounts_calls == 0
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("health", [None, "", "   "])
+async def test_recovery_rejects_missing_or_blank_account_health(app_context, health):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": health, "lifecycle": "bound", "org_id": 178}]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError, match="健康状态不可用"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
     assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_missing_account_id_even_when_record_id_exists(app_context):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 7022, "health": "healthy", "lifecycle": "bound", "org_id": 178}]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError, match="account_id"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_post_auth_failure_disables_previously_enabled_gate(app_context):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    await gate.enable_after_reconcile(1)
+    assert await gate.is_enabled() is True
+
+    async def fail_accounts():
+        gateway.accounts_calls += 1
+        raise EligibilityError("账号查询失败")
+
+    gateway.accounts = fail_accounts
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+    with pytest.raises(EligibilityError, match="账号查询失败"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.me_calls == 1
+    assert gateway.accounts_calls == 1
+    assert await gate.is_enabled() is False
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert state.reason == "reclaude_recovery_failed"
 
 
 @pytest.mark.asyncio

@@ -24,8 +24,6 @@ async def run() -> None:
     configure_logging(settings.log_level)
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
-    if not settings.reclaude_account_email_masked:
-        raise RuntimeError("RECLAUDE_ACCOUNT_EMAIL_MASKED is required for account cross-check")
     session_factory = create_session_factory(settings)
     gate = RecoveryGate(session_factory)
     await gate.ensure_disabled()
@@ -43,6 +41,8 @@ async def run() -> None:
     gateway = ReclaudeClient(
         settings.reclaude_base_url,
         session_cookie=settings.reclaude_session_cookie,
+        login_email=settings.reclaude_login_email,
+        login_password=settings.reclaude_login_password,
         cookie_jar_path=settings.reclaude_cookie_jar_path,
         user_agent=settings.reclaude_user_agent,
         timeout=settings.api_timeout_seconds,

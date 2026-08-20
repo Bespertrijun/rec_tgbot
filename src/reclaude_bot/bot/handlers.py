@@ -115,14 +115,16 @@ def build_admin_router(settings: Settings) -> Router:
         rows = await admin.recent_audit()
         await message.answer("\n".join(f"{row.created_at.isoformat()} {row.action} {row.result}" for row in rows) or "暂无审计记录")
 
-    @router.message(Command("recovery_enable"))
+    @router.message(Command("account", "recovery_enable"))
     async def recovery_enable(message: Message, recovery: RecoveryService) -> None:
         if not is_admin(message):
             return
         try:
             await recovery.health_sync_reconcile_enable(message.from_user.id)  # type: ignore[union-attr]
-            await message.answer("Cookie、账号、周期和成员健康检查完成，已启用上游写操作")
+            await message.answer("账号、周期和成员健康检查完成，已启用上游写操作")
         except DomainError as exc:
             await message.answer(str(exc))
+        except Exception:
+            await message.answer("恢复失败，写操作仍已暂停，请检查 Reclaude 登录和账号状态。")
 
     return router

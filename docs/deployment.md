@@ -23,7 +23,10 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
    ```
 
    The directory and `.env` must be owned by `DEPLOY_USER`; do not leave them
-   root-owned if the deployment account is expected to run Compose.
+   root-owned if the deployment account is expected to run Compose. Keep the file mode
+   at `0600`: this protects the credentials from other non-root host users, but does not
+   protect them from `root`, a Docker daemon running as root, or a container process with
+   equivalent host privileges.
    `DEPLOY_USER` must also be able to run Docker and Compose: use rootless Docker for
    that user, or add it to the host's `docker` group according to your security policy.
    Verify this as the deployment user with `docker compose version` before configuring
@@ -31,15 +34,22 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
 
    Start from [.env.example](../.env.example). Set a strong, unique
    `POSTGRES_PASSWORD`, a matching `DATABASE_URL` using the Compose service name `db`,
-   the Telegram settings, `RECLAUDE_ACCOUNT_EMAIL_MASKED`, and
-   `RECLAUDE_SESSION_COOKIE`. The account ID is discovered during `/recovery_enable`.
+   the Telegram settings, `RECLAUDE_LOGIN_EMAIL`, and `RECLAUDE_LOGIN_PASSWORD`. The
+   account ID is discovered during `/account` (the legacy `/recovery_enable` alias is also
+   accepted); no account email mask is configured
+   in `.env`. `RECLAUDE_SESSION_COOKIE` remains an optional compatibility or initial
+   fallback when a valid persistent cookie jar is not already present. Configure the login
+   email and password together or leave both empty. MFA login responses fail closed because
+   this deployment does not automate MFA.
    Set `RECLAUDE_USER_AGENT` to the exact User-Agent used
    while establishing the session. `RECLAUDE_COOKIE_JAR_PATH` should remain on the
    persistent `/var/lib/reclaude-bot/cookies` volume.
-3. From the fixed egress IP, sign in with a dedicated account and establish a fresh
-   Cookie using that exact User-Agent. Do not paste the Cookie into Git, tickets, chat,
-   shell history, or CI logs. A Cookie that has appeared in a log or message is
-   compromised and must be revoked and replaced.
+3. From the fixed egress IP, use the dedicated account credentials in the server `.env`.
+   The Bot sends `POST /api/auth/login` from this host only during an explicit
+   `/account`; successful `Set-Cookie` values are persisted in the `0600` cookie
+   jar and then verified with `/api/app/me`. Do not paste the password or Cookie into Git,
+   tickets, chat, shell history, or CI logs. A credential or Cookie that has appeared in a
+   log or message is compromised and must be rotated.
 4. The published GHCR image is public and can be pulled anonymously. The production
    server does not need a registry token or `docker login`; `docker compose pull` uses
    the default public image directly.
@@ -89,7 +99,7 @@ ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
 The automated job follows the same sequence and pins `BOT_IMAGE` to the commit SHA. It
 only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose ps`
 shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
-restore, complete the read-only checks and send `/recovery_enable` from an administrator
+restore, complete the read-only checks and send `/account` from an administrator
 account before allowing quota writes.
 
 ## Upgrade and rollback
@@ -106,7 +116,7 @@ docker compose ps
 ```
 
 Use the previous known-good SHA for a rollback. Re-run the health/reconcile checks and
-`/recovery_enable` after either operation. Never roll back by copying a Cookie or `.env`
+`/account` after either operation. Never roll back by copying a Cookie or `.env`
 from another host.
 
 ## Backups and recovery
@@ -123,6 +133,6 @@ docker compose exec -T db \
 
 Keep dumps and the Cookie volume access-restricted. After restoring a dump, the service
 must remain write-disabled while operators verify the account, perform a full members
-snapshot and cycle-baseline reconcile, and then explicitly send `/recovery_enable`.
+snapshot and cycle-baseline reconcile, and then explicitly send `/account`.
 See [the Cookie recovery runbook](cookie-runbook.md) and [operations notes](operations.md)
 for the failure gates and restore procedure.

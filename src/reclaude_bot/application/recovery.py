@@ -8,6 +8,7 @@ from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.infrastructure.db.models import ServiceState
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
+from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse, MeResponse
 
 
 class RecoveryGate:
@@ -73,22 +74,56 @@ class RecoveryService:
         self.settings = settings
 
     async def health_sync_reconcile_enable(self, operator_id: int) -> None:
-        me = await self.gateway.me()
-        accounts = await self.gateway.accounts()
-        members = await self.gateway.members()
-        if len(accounts) != 1:
-            raise EligibilityError("Reclaude 账号数量必须恰好为一个")
-        account = accounts[0]
-        account_id = account.get("id")
-        if account_id is None or (isinstance(account_id, str) and not account_id.strip()):
-            raise EligibilityError("Reclaude 唯一账号缺少有效 ID")
-        if account.get("email_masked") != self.settings.reclaude_account_email_masked:
-            raise EligibilityError("账号邮箱掩码不匹配")
-        if me.current_account.status != "bound":
-            raise EligibilityError("Reclaude 当前账号未绑定")
-        if me.current_account.email_masked != self.settings.reclaude_account_email_masked:
-            raise EligibilityError("当前账号邮箱掩码不匹配")
-        self.gateway.configure_account_id(account_id)
-        await self.quota.sync_cycle_from_me(me=me)
-        await self.quota.sync_members(members=members)
-        await self.gate.enable_after_reconcile(operator_id)
+        await self.gate.disable("reclaude_recovery_in_progress")
+        # A previous successful run must not leave a stale account usable during this run.
+        self.gateway.account_id = None
+        try:
+            me = await self.gateway.authenticate()
+            if not isinstance(me, MeResponse):
+                raise EligibilityError("Reclaude 登录验证响应无效")
+            if me.current_account.status != "bound":
+                raise EligibilityError("Reclaude 当前账号未绑定")
+            # Validate the selected cycle before touching account configuration.
+            me.weekly_all()
+
+            try:
+                accounts = await self.gateway.accounts()
+            except (TypeError, ValueError) as exc:
+                raise EligibilityError("Reclaude 账号响应无效") from exc
+            if not isinstance(accounts, AccountsResponse):
+                raise EligibilityError("Reclaude 账号响应无效")
+            bound_accounts = [record for record in accounts.items if record.lifecycle == "bound"]
+            if len(bound_accounts) == 0:
+                raise EligibilityError("Reclaude 没有可用的已绑定账号")
+            if len(bound_accounts) > 1:
+                raise EligibilityError("Reclaude 已绑定账号不唯一")
+            account = bound_accounts[0]
+            if not isinstance(account, AccountRecord) or not account.has_usable_health():
+                raise EligibilityError("Reclaude 已绑定账号健康状态不可用")
+            account_id = self._validated_account_id(account.account_id)
+
+            self.gateway.configure_account_id(account_id)
+            members = await self.gateway.members()
+            await self.quota.sync_cycle_from_me(me=me)
+            await self.quota.sync_members(members=members)
+            await self.gate.enable_after_reconcile(operator_id)
+        except Exception as exc:
+            reason = "reclaude_recovery_auth_failed" if isinstance(exc, (ConnectionError, TimeoutError)) else "reclaude_recovery_failed"
+            try:
+                await self.gate.disable(reason)
+            except Exception:
+                # The entry transition already disabled the durable gate; retain the original failure.
+                pass
+            raise
+
+    @staticmethod
+    def _validated_account_id(account_id: int | str | None) -> int | str:
+        if isinstance(account_id, bool) or account_id is None:
+            raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")
+        if isinstance(account_id, int):
+            if account_id <= 0:
+                raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")
+            return account_id
+        if account_id.strip().isdigit() and int(account_id.strip()) > 0:
+            return account_id
+        raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")

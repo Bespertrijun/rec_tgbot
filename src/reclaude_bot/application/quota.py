@@ -62,10 +62,10 @@ class QuotaService:
         moment = ensure_utc(now or utcnow())
         me = me or await self.gateway.me()
         weekly = me.weekly_all()
+        if weekly.resets_at is None:
+            raise EligibilityError("Reclaude weekly_all 周期缺少刷新时间")
         reset_at = ensure_utc(weekly.resets_at)
-        account_ok = me.current_account.status == "bound" and (
-            not self.settings.reclaude_account_email_masked or me.current_account.email_masked == self.settings.reclaude_account_email_masked
-        )
+        account_ok = me.current_account.status == "bound"
         status = CycleStatus.VERIFIED.value if account_ok else CycleStatus.NEEDS_REVIEW.value
         async with self._cycle_lock:
             async with self.session_factory() as session:
@@ -120,14 +120,12 @@ class QuotaService:
             me = await self.gateway.me()
             try:
                 weekly = me.weekly_all()
-                valid = ensure_utc(weekly.resets_at) == ensure_utc(reset_at)
+                valid = weekly.resets_at is not None and ensure_utc(weekly.resets_at) == ensure_utc(reset_at)
                 percent = as_decimal(weekly.percent)
             except (ValueError, TypeError):
                 valid = False
                 percent = None
-            account_ok = me.current_account.status == "bound" and (
-                not self.settings.reclaude_account_email_masked or me.current_account.email_masked == self.settings.reclaude_account_email_masked
-            )
+            account_ok = me.current_account.status == "bound"
             async with self.session_factory() as session:
                 async with session.begin():
                     cycle = await session.get(QuotaCycle, cycle_id, with_for_update=True)

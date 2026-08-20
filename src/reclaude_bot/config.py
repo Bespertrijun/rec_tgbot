@@ -4,19 +4,25 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_admin_ids: list[int] = Field(default_factory=list, alias="TELEGRAM_ADMIN_IDS")
     database_url: str = Field(default="sqlite+aiosqlite:///./reclaude.db", alias="DATABASE_URL")
     reclaude_base_url: str = Field(default="https://reclaude.example", alias="RECLAUDE_BASE_URL")
     reclaude_org_id: int = Field(default=178, alias="RECLAUDE_ORG_ID")
-    reclaude_account_email_masked: str = Field(default="", alias="RECLAUDE_ACCOUNT_EMAIL_MASKED")
+    reclaude_login_email: str = Field(default="", alias="RECLAUDE_LOGIN_EMAIL")
+    reclaude_login_password: SecretStr = Field(default=SecretStr(""), alias="RECLAUDE_LOGIN_PASSWORD")
     reclaude_session_cookie: str = Field(default="", alias="RECLAUDE_SESSION_COOKIE")
     reclaude_cookie_jar_path: Path = Field(default=Path("data/cookies/cookies.json"), alias="RECLAUDE_COOKIE_JAR_PATH")
     reclaude_user_agent: str = Field(default="reclaude-quota-bot/1.0", alias="RECLAUDE_USER_AGENT")
@@ -40,6 +46,14 @@ class Settings(BaseSettings):
     @classmethod
     def parse_quota(cls, value: object) -> Decimal:
         return Decimal(str(value))
+
+    @model_validator(mode="after")
+    def validate_login_credentials(self) -> Settings:
+        email_set = bool(self.reclaude_login_email.strip())
+        password_set = bool(self.reclaude_login_password.get_secret_value())
+        if email_set != password_set:
+            raise ValueError("RECLAUDE_LOGIN_EMAIL and RECLAUDE_LOGIN_PASSWORD must be configured together")
+        return self
 
 
 @lru_cache(maxsize=1)

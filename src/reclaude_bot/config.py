@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite+aiosqlite:///./reclaude.db", alias="DATABASE_URL")
     reclaude_base_url: str = Field(default="https://reclaude.example", alias="RECLAUDE_BASE_URL")
     reclaude_org_id: int = Field(default=178, alias="RECLAUDE_ORG_ID")
-    reclaude_account_id: int = Field(default=4949, alias="RECLAUDE_ACCOUNT_ID")
     reclaude_account_email_masked: str = Field(default="", alias="RECLAUDE_ACCOUNT_EMAIL_MASKED")
     reclaude_session_cookie: str = Field(default="", alias="RECLAUDE_SESSION_COOKIE")
     reclaude_cookie_jar_path: Path = Field(default=Path("data/cookies/cookies.json"), alias="RECLAUDE_COOKIE_JAR_PATH")

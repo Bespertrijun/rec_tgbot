@@ -16,6 +16,7 @@ from reclaude_bot.jobs.usage_poll import poll_once
 
 async def seed(app_context, *, account_id: int | None = 4949, total: str = "0"):
     factory, gateway, settings = app_context
+    gateway.configure_account_id(4949)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=account_id, total_usage_usd=Decimal(total))
     quota = QuotaService(factory, gateway, settings)
     now = datetime(2026, 8, 18, tzinfo=UTC)

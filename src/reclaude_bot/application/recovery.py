@@ -76,15 +76,19 @@ class RecoveryService:
         me = await self.gateway.me()
         accounts = await self.gateway.accounts()
         members = await self.gateway.members()
-        account_rows = [item for item in accounts if str(item.get("id")) == str(self.settings.reclaude_account_id)]
-        if len(account_rows) != 1:
-            raise EligibilityError("配置账号不存在或不唯一")
-        if self.settings.reclaude_account_email_masked and account_rows[0].get("email_masked") != self.settings.reclaude_account_email_masked:
-            raise EligibilityError("配置账号邮箱掩码不匹配")
+        if len(accounts) != 1:
+            raise EligibilityError("Reclaude 账号数量必须恰好为一个")
+        account = accounts[0]
+        account_id = account.get("id")
+        if account_id is None or (isinstance(account_id, str) and not account_id.strip()):
+            raise EligibilityError("Reclaude 唯一账号缺少有效 ID")
+        if account.get("email_masked") != self.settings.reclaude_account_email_masked:
+            raise EligibilityError("账号邮箱掩码不匹配")
         if me.current_account.status != "bound":
             raise EligibilityError("Reclaude 当前账号未绑定")
-        if self.settings.reclaude_account_email_masked and me.current_account.email_masked != self.settings.reclaude_account_email_masked:
+        if me.current_account.email_masked != self.settings.reclaude_account_email_masked:
             raise EligibilityError("当前账号邮箱掩码不匹配")
+        self.gateway.configure_account_id(account_id)
         await self.quota.sync_cycle_from_me(me=me)
         await self.quota.sync_members(members=members)
         await self.gate.enable_after_reconcile(operator_id)

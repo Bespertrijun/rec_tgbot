@@ -48,7 +48,6 @@ async def run() -> None:
         timeout=settings.api_timeout_seconds,
         max_retries=settings.api_max_retries,
         org_id=settings.reclaude_org_id,
-        account_id=settings.reclaude_account_id,
         auth_alert_callback=auth_alert,
     )
     quota = QuotaService(session_factory, gateway, settings)

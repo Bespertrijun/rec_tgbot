@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from reclaude_bot.domain.errors import AuthenticationCircuitOpen, UpstreamError
+from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError, UpstreamError
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeClient
 
 
@@ -89,10 +89,12 @@ async def test_concurrent_requests_stop_after_first_401(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_get_retries_but_write_request_does_not(tmp_path) -> None:
     calls = 0
+    paths: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        paths.append(request.url.path)
         return httpx.Response(503, request=request)
 
     client = ReclaudeClient("https://example.test", session_cookie="rc_sid=test", cookie_jar_path=tmp_path / "cookies.json", max_retries=2)
@@ -103,7 +105,18 @@ async def test_get_retries_but_write_request_does_not(tmp_path) -> None:
     assert calls == 3
 
     calls = 0
+    paths.clear()
+    client.configure_account_id(8123)
     with pytest.raises(UpstreamError):
         await client.assign("u-1")
     assert calls == 1
+    assert paths == ["/api/app/orgs/178/accounts/8123/assignments"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_assign_requires_recovery_account_configuration(tmp_path) -> None:
+    client = ReclaudeClient("https://example.test", session_cookie="rc_sid=test", cookie_jar_path=tmp_path / "cookies.json")
+    with pytest.raises(EligibilityError, match="尚未完成恢复配置"):
+        await client.assign("u-1")
     await client.close()

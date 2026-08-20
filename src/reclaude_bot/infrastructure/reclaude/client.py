@@ -14,7 +14,7 @@ from uuid import uuid4
 import httpx
 import structlog
 
-from reclaude_bot.domain.errors import AuthenticationCircuitOpen, UpstreamError
+from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError, UpstreamError
 
 from .models import MembersResponse, MeResponse
 
@@ -22,9 +22,12 @@ log = structlog.get_logger(__name__)
 
 
 class ReclaudeGateway(Protocol):
+    account_id: int | str | None
+
     async def members(self) -> MembersResponse: ...
     async def me(self) -> MeResponse: ...
     async def accounts(self) -> list[dict[str, Any]]: ...
+    def configure_account_id(self, account_id: int | str) -> None: ...
     async def assign(self, user_id: str | int) -> httpx.Response | None: ...
     async def revoke(self, user_id: str | int) -> httpx.Response | None: ...
 
@@ -62,7 +65,7 @@ class ReclaudeClient:
         timeout: float = 15.0,
         max_retries: int = 2,
         org_id: int = 178,
-        account_id: int = 4949,
+        account_id: int | str | None = None,
         auth_alert_callback: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -71,7 +74,9 @@ class ReclaudeClient:
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
         self.org_id = org_id
-        self.account_id = account_id
+        self.account_id: int | str | None = None
+        if account_id is not None:
+            self.configure_account_id(account_id)
         self.auth_alert_callback = auth_alert_callback
         self._circuit_open = False
         self._alert_sent = False
@@ -191,7 +196,20 @@ class ReclaudeClient:
             return payload["data"]
         raise UpstreamError("Reclaude accounts response has invalid shape")
 
+    def configure_account_id(self, account_id: int | str) -> None:
+        if isinstance(account_id, bool) or (isinstance(account_id, str) and not account_id.strip()):
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if not isinstance(account_id, (int, str)):
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        self.account_id = account_id
+
+    def set_account_id(self, account_id: int | str) -> None:
+        """Backward-compatible alias for configuring the recovered account."""
+        self.configure_account_id(account_id)
+
     async def assign(self, user_id: str | int) -> httpx.Response:
+        if self.account_id is None:
+            raise EligibilityError("Reclaude 账号尚未完成恢复配置")
         return await self._request("POST", f"/api/app/orgs/{self.org_id}/accounts/{self.account_id}/assignments", json={"user_id": user_id})
 
     async def revoke(self, user_id: str | int) -> httpx.Response:

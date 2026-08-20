@@ -31,8 +31,9 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
 
    Start from [.env.example](../.env.example). Set a strong, unique
    `POSTGRES_PASSWORD`, a matching `DATABASE_URL` using the Compose service name `db`,
-   the Telegram settings, the Reclaude account identifiers, and
-   `RECLAUDE_SESSION_COOKIE`. Set `RECLAUDE_USER_AGENT` to the exact User-Agent used
+   the Telegram settings, `RECLAUDE_ACCOUNT_EMAIL_MASKED`, and
+   `RECLAUDE_SESSION_COOKIE`. The account ID is discovered during `/recovery_enable`.
+   Set `RECLAUDE_USER_AGENT` to the exact User-Agent used
    while establishing the session. `RECLAUDE_COOKIE_JAR_PATH` should remain on the
    persistent `/var/lib/reclaude-bot/cookies` volume.
 3. From the fixed egress IP, sign in with a dedicated account and establish a fresh

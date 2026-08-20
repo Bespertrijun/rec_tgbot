@@ -79,7 +79,7 @@ class QuotaService:
                             started_at=previous.reset_at if previous else reset_at - timedelta(days=7),
                             reset_at=reset_at,
                             weekly_percent=None,
-                            source_account_id=self.settings.reclaude_account_id,
+                            source_account_id=self._source_account_id(),
                             source_account_email_masked=me.current_account.email_masked,
                             status=status,
                             created_at=moment,
@@ -87,9 +87,19 @@ class QuotaService:
                         session.add(cycle)
                     else:
                         cycle.status = status
+                        cycle.source_account_id = self._source_account_id()
                         cycle.source_account_email_masked = me.current_account.email_masked
                     await session.flush()
                     return cycle
+
+    def _source_account_id(self) -> int | None:
+        account_id = self.gateway.account_id
+        if account_id is None:
+            return None
+        try:
+            return int(account_id)
+        except (TypeError, ValueError):
+            return None
 
     async def ensure_cycle(self, *, now: datetime | None = None) -> QuotaCycle:
         moment = ensure_utc(now or utcnow())

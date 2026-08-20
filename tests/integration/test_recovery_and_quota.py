@@ -11,7 +11,8 @@ from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.domain.enums import BaselineStatus, QuotaRevocationStatus
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaRevocation, ServiceState, UpstreamMember
+from reclaude_bot.domain.errors import EligibilityError
+from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import Member
 from reclaude_bot.jobs.usage_poll import poll_once
 
@@ -54,6 +55,7 @@ async def test_status_is_cache_only_and_used_uses_dynamic_limit(app_context):
 @pytest.mark.asyncio
 async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
     factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 8123, "email_masked": settings.reclaude_account_email_masked}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
     quota = QuotaService(factory, gateway, settings)
@@ -62,10 +64,68 @@ async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
     assert gateway.me_calls == 1
     assert gateway.accounts_calls == 1
     assert gateway.members_calls == 1
+    assert gateway.account_id == 8123
     assert await gate.is_enabled()
     async with factory() as session:
         state = await session.get(ServiceState, 1)
         assert state.write_enabled is True
+        cycle = await session.scalar(select(QuotaCycle))
+        assert cycle.source_account_id == 8123
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_multiple_accounts_without_configuring_id(app_context):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [
+        {"id": 8123, "email_masked": settings.reclaude_account_email_masked},
+        {"id": 8124, "email_masked": settings.reclaude_account_email_masked},
+    ]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    quota = QuotaService(factory, gateway, settings)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+
+    with pytest.raises(EligibilityError, match="恰好为一个"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_account_email_mismatch_without_configuring_id(app_context):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 8123, "email_masked": "other***@example.com"}]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    quota = QuotaService(factory, gateway, settings)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+
+    with pytest.raises(EligibilityError, match="账号邮箱掩码不匹配"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_current_account_email_mismatch_without_configuring_id(app_context):
+    factory, gateway, settings = app_context
+    gateway.me_response = gateway.me_response.model_copy(
+        update={
+            "current_account": gateway.me_response.current_account.model_copy(update={"email_masked": "other***@example.com"}),
+        }
+    )
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    quota = QuotaService(factory, gateway, settings)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+
+    with pytest.raises(EligibilityError, match="当前账号邮箱掩码不匹配"):
+        await recovery.health_sync_reconcile_enable(1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
 
 
 @pytest.mark.asyncio

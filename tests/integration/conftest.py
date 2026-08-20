@@ -27,7 +27,11 @@ async def app_context():
             ),
         ),
     )
-    gateway = FakeReclaudeGateway([Member(user_id="u-1", email="one@example.com", account_id=None, total_usage_usd="0")], me)
+    gateway = FakeReclaudeGateway(
+        [Member(user_id="u-1", email="one@example.com", account_id=None, total_usage_usd="0")],
+        me,
+        accounts=[{"id": 4949, "email_masked": me.current_account.email_masked}],
+    )
     settings = Settings(
         TELEGRAM_BOT_TOKEN="test",
         TELEGRAM_ADMIN_IDS=[1],

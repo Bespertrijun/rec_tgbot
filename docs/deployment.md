@@ -2,8 +2,10 @@
 
 The production host runs the published image with Docker Compose and keeps its
 configuration and Cookie outside the repository. The GitHub deployment job uploads only
-`docker-compose.prod.yml`; it never uploads or overwrites the server `.env` or the Cookie
-volume.
+`docker-compose.yml`; it never uploads or overwrites the server `.env` or the Cookie
+volume. Because the production file uses Compose's default filename, commands on the
+server can use `docker compose pull` and `docker compose up -d` without an explicit
+`-f` argument.
 
 ## First-time server setup
 
@@ -37,18 +39,9 @@ volume.
    Cookie using that exact User-Agent. Do not paste the Cookie into Git, tickets, chat,
    shell history, or CI logs. A Cookie that has appeared in a log or message is
    compromised and must be revoked and replaced.
-4. Log the host into the private GitHub Container Registry package with a short-lived or
-   fine-grained token that has only `read:packages`:
-
-   ```sh
-   sudo -iu "$DEPLOY_USER"
-   read -r GHCR_TOKEN
-   printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u GITHUB_USERNAME --password-stdin
-   unset GHCR_TOKEN
-   exit
-   ```
-
-   Do not put the token in `.env`.
+4. The published GHCR image is public and can be pulled anonymously. The production
+   server does not need a registry token or `docker login`; `docker compose pull` uses
+   the default public image directly.
 
 ## GitHub settings
 
@@ -70,8 +63,9 @@ Add these variables:
 | `DEPLOY_ENABLED` | `true` to enable the production job; anything else disables it |
 | `DEPLOY_PATH` | Existing absolute directory, for example `/srv/reclaude-bot` |
 
-The image publish job uses the workflow `GITHUB_TOKEN` with `packages:write`. The host's
-separate registry token only needs package read access.
+The image publish job uses the workflow `GITHUB_TOKEN` with `packages:write`. This token
+is used only by GitHub Actions to publish the image; it is never copied to the host, and
+the production server does not need a registry token.
 
 Before saving `DEPLOY_KNOWN_HOSTS`, verify the server's SSH host key fingerprint through
 an independent trusted channel. For example, compare the output of
@@ -85,14 +79,14 @@ The target directory must already contain the server `.env`. From a checked-out 
 the repository, an operator can perform the first deployment with:
 
 ```sh
-scp -P "$DEPLOY_PORT" docker-compose.prod.yml \
-  "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.prod.yml.new"
+scp -P "$DEPLOY_PORT" docker-compose.yml \
+  "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.yml.new"
 ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-  "cd '$DEPLOY_PATH' && mv -f -- docker-compose.prod.yml.new docker-compose.prod.yml && docker compose -f docker-compose.prod.yml pull bot && docker compose -f docker-compose.prod.yml up -d"
+  "cd '$DEPLOY_PATH' && mv -f -- docker-compose.yml.new docker-compose.yml && docker compose pull bot && docker compose up -d"
 ```
 
 The automated job follows the same sequence and pins `BOT_IMAGE` to the commit SHA. It
-only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose -f docker-compose.prod.yml ps`
+only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose ps`
 shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
 restore, complete the read-only checks and send `/recovery_enable` from an administrator
 account before allowing quota writes.
@@ -105,9 +99,9 @@ tag. To manually select a version without changing `.env`:
 
 ```sh
 export BOT_IMAGE=ghcr.io/bespertrijun/rec_tgbot:sha-COMMIT_SHA
-docker compose -f docker-compose.prod.yml pull bot
-docker compose -f docker-compose.prod.yml up -d --no-deps bot
-docker compose -f docker-compose.prod.yml ps
+docker compose pull bot
+docker compose up -d --no-deps bot
+docker compose ps
 ```
 
 Use the previous known-good SHA for a rollback. Re-run the health/reconcile checks and
@@ -122,7 +116,7 @@ database port:
 
 ```sh
 mkdir -p backups
-docker compose -f docker-compose.prod.yml exec -T db \
+docker compose exec -T db \
   pg_dump -U bot -d reclaude --format=custom > "backups/reclaude-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 

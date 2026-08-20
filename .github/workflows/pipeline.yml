@@ -72,7 +72,7 @@ jobs:
           # CI-only copy temporary; it is never uploaded or published.
           cp "${ci_env}" .env
           trap 'rm -f .env' EXIT
-          docker compose --env-file "${ci_env}" -f docker-compose.prod.yml config --quiet
+          docker compose --env-file "${ci_env}" config --quiet
 
   secret-scan:
     name: Scan repository for leaked secrets
@@ -192,10 +192,10 @@ jobs:
           )
           ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "mkdir -p -- '${DEPLOY_PATH}' && test -f '${DEPLOY_PATH}/.env'"
-          scp "${scp_args[@]}" docker-compose.prod.yml \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.prod.yml.new"
+          scp "${scp_args[@]}" docker-compose.yml \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.yml.new"
           ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "set -eu; cd -- '${DEPLOY_PATH}'; test -f .env; mv -f -- docker-compose.prod.yml.new docker-compose.prod.yml"
+            "set -eu; cd -- '${DEPLOY_PATH}'; test -f .env; mv -f -- docker-compose.yml.new docker-compose.yml"
 
       - name: Pull, restart, and verify the bot remotely
         run: |
@@ -212,8 +212,8 @@ jobs:
              cd -- '${DEPLOY_PATH}'
              test -f .env
              export BOT_IMAGE='${IMAGE_TAG}'
-             docker compose -f docker-compose.prod.yml pull bot
-             docker compose -f docker-compose.prod.yml up -d --remove-orphans
+             docker compose pull bot
+             docker compose up -d --remove-orphans
              sleep 5
-             running=\$(docker compose -f docker-compose.prod.yml ps --status running --services)
+             running=\$(docker compose ps --status running --services)
              printf '%s\\n' \"\${running}\" | grep -Fxq bot"

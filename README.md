@@ -7,7 +7,7 @@ port 25 is required.
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 Before enabling writes in production, establish a dedicated Cookie session from the

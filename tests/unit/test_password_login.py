@@ -135,8 +135,11 @@ async def test_wrong_password_is_safe_and_not_retried(caplog, tmp_path: Path) ->
     )
     await _replace_transport(client, handler)
     try:
-        with pytest.raises(UpstreamError, match="credentials are invalid") as caught:
+        with pytest.raises(UpstreamError) as caught:
             await client.authenticate()
+        assert str(caught.value) == (
+            "Reclaude login credentials are invalid, please fix the login information and restart docker"
+        )
         assert calls == 1
         assert password not in str(caught.value)
         assert password not in caplog.text

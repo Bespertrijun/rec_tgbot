@@ -267,7 +267,9 @@ class ReclaudeClient:
                 raise UpstreamError("Reclaude login is rate limited; retry recovery later")
             if status in (401, 403):
                 self._circuit_open = True
-                raise UpstreamError("Reclaude login credentials are invalid")
+                raise UpstreamError(
+                    "Reclaude login credentials are invalid, please fix the login information and restart docker"
+                )
             if status >= 500:
                 self._circuit_open = True
                 raise UpstreamError("Reclaude login service is temporarily unavailable")

@@ -20,6 +20,20 @@ def test_default_user_agent_is_a_linux_chrome_browser_ua() -> None:
     )
 
 
+def test_numeric_admin_ids_env_value_is_a_single_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_ADMIN_IDS", "123456789")
+
+    settings = Settings()
+
+    assert settings.telegram_admin_ids == [123456789]
+
+
+def test_admin_ids_accept_comma_separated_values() -> None:
+    settings = Settings.model_validate({"TELEGRAM_ADMIN_IDS": "123456789, 987654321"})
+
+    assert settings.telegram_admin_ids == [123456789, 987654321]
+
+
 @pytest.mark.asyncio
 async def test_direct_client_uses_the_same_default_user_agent() -> None:
     client = ReclaudeClient("https://example.test", session_cookie="rc_sid=test")

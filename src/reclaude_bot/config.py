@@ -39,9 +39,11 @@ class Settings(BaseSettings):
 
     @field_validator("telegram_admin_ids", mode="before")
     @classmethod
-    def parse_admins(cls, value: str | list[int] | tuple[int, ...]) -> list[int]:
+    def parse_admins(cls, value: str | int | list[int] | tuple[int, ...]) -> list[int]:
         if isinstance(value, str):
             return [int(item.strip()) for item in value.split(",") if item.strip()]
+        if isinstance(value, int):
+            return [value]
         return [int(item) for item in value]
 
     @field_validator("quota_limit_usd", mode="before")

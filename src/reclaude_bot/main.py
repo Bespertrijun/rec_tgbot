@@ -11,6 +11,7 @@ from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
+from reclaude_bot.bot.commands import register_command_menus
 from reclaude_bot.bot.handlers import build_admin_router, build_router
 from reclaude_bot.config import get_settings
 from reclaude_bot.infrastructure.db.database import create_session_factory
@@ -65,6 +66,7 @@ async def run() -> None:
     dp.include_router(build_router(settings))
     dp.include_router(build_admin_router(settings))
     try:
+        await register_command_menus(bot, settings.telegram_admin_ids)
         await jobs.start()
         await dp.start_polling(bot)
     finally:

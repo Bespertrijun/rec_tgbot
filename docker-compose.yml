@@ -19,6 +19,8 @@ services:
     image: ${BOT_IMAGE:-ghcr.io/bespertrijun/rec_tgbot:latest}
     env_file:
       - .env
+    environment:
+      RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json
     depends_on:
       db:
         condition: service_healthy

@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from reclaude_bot.infrastructure.reclaude.constants import DEFAULT_RECLAUDE_USER_AGENT
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -25,7 +27,7 @@ class Settings(BaseSettings):
     reclaude_login_password: SecretStr = Field(default=SecretStr(""), alias="RECLAUDE_LOGIN_PASSWORD")
     reclaude_session_cookie: str = Field(default="", alias="RECLAUDE_SESSION_COOKIE")
     reclaude_cookie_jar_path: Path = Field(default=Path("data/cookies/cookies.json"), alias="RECLAUDE_COOKIE_JAR_PATH")
-    reclaude_user_agent: str = Field(default="reclaude-quota-bot/1.0", alias="RECLAUDE_USER_AGENT")
+    reclaude_user_agent: str = Field(default=DEFAULT_RECLAUDE_USER_AGENT, alias="RECLAUDE_USER_AGENT")
     timezone: str = Field(default="Asia/Shanghai", alias="TIMEZONE")
     api_timeout_seconds: float = Field(default=15.0, alias="API_TIMEOUT_SECONDS")
     api_max_retries: int = Field(default=2, alias="API_MAX_RETRIES")

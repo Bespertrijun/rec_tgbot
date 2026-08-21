@@ -41,9 +41,11 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
    fallback when a valid persistent cookie jar is not already present. Configure the login
    email and password together or leave both empty. MFA login responses fail closed because
    this deployment does not automate MFA.
-   Set `RECLAUDE_USER_AGENT` to the exact User-Agent used
-   while establishing the session. `RECLAUDE_COOKIE_JAR_PATH` should remain on the
-   persistent `/var/lib/reclaude-bot/cookies` volume.
+   The Compose file fixes `RECLAUDE_COOKIE_JAR_PATH` to
+   `/var/lib/reclaude-bot/cookies/cookies.json` and mounts that directory on the persistent
+   `reclaude-cookies` named volume; do not add this variable to `.env`. The bot uses a
+   normal Linux Chrome browser User-Agent by default, so `RECLAUDE_USER_AGENT` does not
+   need to be configured.
 3. From the fixed egress IP, use the dedicated account credentials in the server `.env`.
    The Bot sends `POST /api/auth/login` from this host only during an explicit
    `/account`; successful `Set-Cookie` values are persisted in the `0600` cookie

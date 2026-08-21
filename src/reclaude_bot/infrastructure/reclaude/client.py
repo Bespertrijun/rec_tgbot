@@ -17,6 +17,7 @@ from pydantic import SecretStr
 
 from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError, UpstreamError
 
+from .constants import DEFAULT_RECLAUDE_USER_AGENT
 from .models import AccountsResponse, MembersResponse, MeResponse
 
 log = structlog.get_logger(__name__)
@@ -63,7 +64,7 @@ class ReclaudeClient:
         base_url: str,
         session_cookie: str | None = None,
         cookie_jar_path: str | Path | None = None,
-        user_agent: str = "reclaude-quota-bot/1.0",
+        user_agent: str = DEFAULT_RECLAUDE_USER_AGENT,
         timeout: float = 15.0,
         max_retries: int = 2,
         org_id: int = 178,

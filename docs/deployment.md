@@ -1,11 +1,14 @@
 # Production Deployment
 
 The production host runs the published image with Docker Compose and keeps its
-configuration and Cookie outside the repository. The GitHub deployment job uploads only
-`docker-compose.yml`; it never uploads or overwrites the server `.env` or the Cookie
-volume. Because the production file uses Compose's default filename, commands on the
-server can use `docker compose pull` and `docker compose up -d` without an explicit
-`-f` argument.
+configuration and runtime data in the deployment directory. The GitHub deployment job
+uploads only `docker-compose.yml`; it never uploads or overwrites the server `.env` or
+the `data/` directory. Because the production file uses Compose's default filename,
+commands on the server can use `docker compose pull` and `docker compose up -d` without
+an explicit `-f` argument. Relative mounts are resolved beside that Compose file, so a
+deployment at `/srv/reclaude-bot` stores PostgreSQL data in
+`/srv/reclaude-bot/data/postgres` and the Cookie jar in
+`/srv/reclaude-bot/data/cookies`.
 
 ## First-time server setup
 
@@ -42,10 +45,10 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
    email and password together or leave both empty. MFA login responses fail closed because
    this deployment does not automate MFA.
    The Compose file fixes `RECLAUDE_COOKIE_JAR_PATH` to
-   `/var/lib/reclaude-bot/cookies/cookies.json` and mounts that directory on the persistent
-   `reclaude-cookies` named volume; do not add this variable to `.env`. The bot uses a
-   normal Linux Chrome browser User-Agent by default, so `RECLAUDE_USER_AGENT` does not
-   need to be configured.
+   `/var/lib/reclaude-bot/cookies/cookies.json` and bind-mounts that directory from
+   `./data/cookies`; do not add this variable to `.env`. The bot uses a normal Linux
+   Chrome browser User-Agent by default, so `RECLAUDE_USER_AGENT` does not need to be
+   configured.
 3. From the fixed egress IP, use the dedicated account credentials in the server `.env`.
    The Bot sends `POST /api/auth/login` from this host only during an explicit
    `/account`; successful `Set-Cookie` values are persisted in the `0600` cookie
@@ -55,6 +58,44 @@ server can use `docker compose pull` and `docker compose up -d` without an expli
 4. The published GHCR image is public and can be pulled anonymously. The production
    server does not need a registry token or `docker login`; `docker compose pull` uses
    the default public image directly.
+5. Initialize the two host directories before the first start. Run these commands from
+   the directory containing `docker-compose.yml` (for example, `/srv/reclaude-bot`):
+
+   ```sh
+   install -d -m 700 data data/postgres data/cookies
+   chmod 700 data data/postgres data/cookies
+   ```
+
+   The published bot image runs as UID `10001` (`bot`). The numeric UID/GID of
+   `postgres:16-alpine` is image-specific, so read it from the exact image before
+   assigning the bind directory. With the usual rootful Docker daemon:
+
+   ```sh
+   POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
+   POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
+   sudo chown "$POSTGRES_UID:$POSTGRES_GID" data/postgres
+   sudo chown 10001:10001 data/cookies
+   ```
+
+   Do not change the bot to run as root. On rootless Docker, host numeric ownership is
+   user-namespace mapped and the `sudo chown` values above are not the right host IDs.
+   Let the same Docker daemon perform the ownership change instead (after `docker
+   compose pull`):
+
+   ```sh
+   docker compose run --rm --no-deps --user 0 --entrypoint chown bot \
+     10001:10001 /var/lib/reclaude-bot/cookies
+   POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
+   POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
+   docker compose run --rm --no-deps --user 0 --entrypoint chown db \
+     "$POSTGRES_UID:$POSTGRES_GID" /var/lib/postgresql/data
+   ```
+
+   These commands work with rootless Docker because UID `0` is confined to the
+   daemon's user namespace; the host sees the corresponding subordinate IDs. If a
+   distribution uses a different Postgres image or remaps users, the same `id` commands
+   use the actual image values. Keep the parent `data` directory accessible to the
+   deployment user so Compose can mount it; keep both child directories mode `0700`.
 
 ## GitHub settings
 
@@ -98,6 +139,15 @@ ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
   "cd '$DEPLOY_PATH' && mv -f -- docker-compose.yml.new docker-compose.yml && docker compose pull bot && docker compose up -d"
 ```
 
+Before that first `docker compose up -d`, complete the `data/` directory initialization
+and ownership commands in step 5 above. An upgrade replaces only the Compose file and
+reuses the same bind directories; rerun `docker compose config --quiet`, check their
+ownership/mode, then run `docker compose pull bot && docker compose up -d
+--remove-orphans`. This change does not copy data from the old named volumes. If the
+currently running stack still contains important data in a named volume, stop and
+perform a separately reviewed backup/migration before switching mounts; do not assume
+the new empty bind directory contains that data.
+
 The automated job follows the same sequence and pins `BOT_IMAGE` to the commit SHA. It
 only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose ps`
 shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
@@ -121,6 +171,38 @@ Use the previous known-good SHA for a rollback. Re-run the health/reconcile chec
 `/account` after either operation. Never roll back by copying a Cookie or `.env`
 from another host.
 
+## Inspecting and retiring old named volumes
+
+The previous Compose file created project-prefixed named volumes. List the exact names
+before touching them:
+
+```sh
+docker volume ls --format '{{.Name}}' | grep -E '(^|_)reclaude-cookies$' || true
+docker volume ls --format '{{.Name}}' | grep -E '(^|_)postgres-data$' || true
+```
+
+For a candidate Cookie volume, inspect its metadata and contents read-only (replace the
+placeholder with the exact name printed above):
+
+```sh
+OLD_COOKIE_VOLUME='project_reclaude-cookies'
+docker volume inspect "$OLD_COOKIE_VOLUME"
+docker run --rm --mount "source=$OLD_COOKIE_VOLUME,target=/volume,readonly" alpine:3.20 \
+  sh -c 'find /volume -mindepth 1 -maxdepth 2 -print'
+```
+
+Only after confirming that the old Cookie volume contains no data you still need may it
+be removed:
+
+```sh
+docker volume rm "$OLD_COOKIE_VOLUME"
+```
+
+Do not remove any `postgres-data` volume as part of this change. Its contents are the
+database and must be retained until a verified backup and an explicit migration or
+retirement decision exists. `docker compose down -v` is also unsafe here because it can
+remove named database and Cookie volumes.
+
 ## Backups and recovery
 
 Take an encrypted PostgreSQL dump before upgrades and retain at least 30 days of dumps.
@@ -133,7 +215,7 @@ docker compose exec -T db \
   pg_dump -U bot -d reclaude --format=custom > "backups/reclaude-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 
-Keep dumps and the Cookie volume access-restricted. After restoring a dump, the service
+Keep dumps and `data/cookies` access-restricted. After restoring a dump, the service
 must remain write-disabled while operators verify the account, perform a full members
 snapshot and cycle-baseline reconcile, and then explicitly send `/account`.
 See [the Cookie recovery runbook](cookie-runbook.md) and [operations notes](operations.md)

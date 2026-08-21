@@ -43,7 +43,11 @@ async def test_direct_client_uses_the_same_default_user_agent() -> None:
         await client.close()
 
 
-def test_compose_pins_cookie_jar_to_persistent_volume() -> None:
+def test_compose_uses_project_local_persistent_bind_mounts() -> None:
     compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text()
     assert "RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json" in compose
-    assert "- reclaude-cookies:/var/lib/reclaude-bot/cookies" in compose
+    assert "- ./data/postgres:/var/lib/postgresql/data" in compose
+    assert "- ./data/cookies:/var/lib/reclaude-bot/cookies" in compose
+    assert "postgres-data:" not in compose
+    assert "reclaude-cookies:" not in compose
+    assert "\nvolumes:\n" not in compose

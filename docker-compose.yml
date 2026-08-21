@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-bot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the server .env}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-bot} -d $${POSTGRES_DB:-reclaude}"]
       interval: 5s
@@ -25,9 +25,5 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - reclaude-cookies:/var/lib/reclaude-bot/cookies
+      - ./data/cookies:/var/lib/reclaude-bot/cookies
     restart: unless-stopped
-
-volumes:
-  postgres-data:
-  reclaude-cookies:

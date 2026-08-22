@@ -92,6 +92,10 @@ def test_compose_uses_project_local_persistent_bind_mounts() -> None:
     assert "- ./data/postgres:/var/lib/postgresql/data" in compose
     assert "- ./data/cookies:/var/lib/reclaude-bot/cookies" in compose
     assert "- ./data/logs:/var/lib/reclaude-bot/logs" in compose
+    assert "  permissions:" in compose
+    assert '    user: "0:0"' in compose
+    assert "chown -R 10001:10001 /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs" in compose
+    assert "condition: service_completed_successfully" in compose
     assert "postgres-data:" not in compose
     assert "reclaude-cookies:" not in compose
     assert "\nvolumes:\n" not in compose
@@ -103,3 +107,11 @@ def test_log_file_path_is_optional_and_blank_values_disable_file_logging() -> No
 
     blank = _settings(DATABASE_URL=TEST_DATABASE_URL, LOG_FILE_PATH=" ")
     assert blank.log_file_path is None
+
+
+def test_dev_compose_initializes_named_cookie_and_log_volumes_before_bot() -> None:
+    compose = (Path(__file__).parents[2] / "docker-compose.dev.yml").read_text()
+    assert "  permissions:" in compose
+    assert "- reclaude-cookies:/var/lib/reclaude-bot/cookies" in compose
+    assert "- reclaude-logs:/var/lib/reclaude-bot/logs" in compose
+    assert "condition: service_completed_successfully" in compose

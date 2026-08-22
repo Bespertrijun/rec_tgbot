@@ -65,47 +65,47 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
 4. The published GHCR image is public and can be pulled anonymously. The production
    server does not need a registry token or `docker login`; `docker compose pull` uses
    the default public image directly.
-5. Initialize the host directories before the first start. Run these commands from
+5. Prepare the deployment data directory before the first start. Run these commands from
    the directory containing `docker-compose.yml` (for example, `/srv/reclaude-bot`):
 
    ```sh
-   install -d -m 700 data data/postgres data/cookies data/logs
-   chmod 700 data data/postgres data/cookies data/logs
+   install -d -m 700 data data/postgres
+   chmod 700 data data/postgres
    ```
 
-   The published bot image runs as UID `10001` (`bot`). The numeric UID/GID of
-   `postgres:16-alpine` is image-specific, so read it from the exact image before
-   assigning the bind directory. With the usual rootful Docker daemon:
+   Compose creates missing `data/cookies` and `data/logs` bind-mount directories as
+   needed. Before the bot starts, the one-shot `permissions` service runs the published
+   bot image as `user: "0:0"`, recursively assigns both directories and their existing
+   contents to UID/GID `10001:10001`, sets directories to `0700`, and sets existing files
+   to `0600`. It exits after this initialization; the long-running `bot` service remains
+   UID `10001` and depends on its successful completion. Do not run the bot as root or
+   weaken either directory to `0777`.
+
+   The numeric UID/GID of `postgres:16-alpine` is image-specific, so read it from the
+   exact image before assigning the PostgreSQL bind directory. With the usual rootful
+   Docker daemon:
 
    ```sh
    POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
    POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
    sudo chown "$POSTGRES_UID:$POSTGRES_GID" data/postgres
-   sudo chown -R 10001:10001 data/cookies data/logs
    ```
 
-   Do not change the bot to run as root. On rootless Docker, host numeric ownership is
-   user-namespace mapped and the `sudo chown` values above are not the right host IDs.
-   Let the same Docker daemon perform the ownership change instead (after `docker
-   compose pull`):
+   On rootless Docker, host numeric ownership is user-namespace mapped and the `sudo
+   chown` values above are not the right host IDs. Let the same Docker daemon assign the
+   PostgreSQL ownership instead (after `docker compose pull`):
 
    ```sh
-   docker compose run --rm --no-deps --user 0 --entrypoint chown bot \
-     -R 10001:10001 /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs
    POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
    POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
    docker compose run --rm --no-deps --user 0 --entrypoint chown db \
      "$POSTGRES_UID:$POSTGRES_GID" /var/lib/postgresql/data
    ```
 
-   These commands work with rootless Docker because UID `0` is confined to the
-   daemon's user namespace; the host sees the corresponding subordinate IDs. If a
-   distribution uses a different Postgres image or remaps users, the same `id` commands
-   use the actual image values. The recursive bot ownership command also repairs files
-   left root-owned by an earlier container; the bot preserves the Cookie jar's `0600`
-   mode when it writes it. Keep the parent `data` directory accessible to the deployment
-   user so Compose can mount it; keep `data/postgres`, `data/cookies`, and `data/logs`
-   mode `0700`.
+   If a distribution uses a different Postgres image or remaps users, the same `id`
+   commands use the actual image values. Keep the parent `data` directory accessible to
+   the deployment user so Compose can mount it; the `permissions` service owns and
+   restricts `data/cookies` and `data/logs` automatically.
 
 ## GitHub settings
 
@@ -149,8 +149,9 @@ ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
   "cd '$DEPLOY_PATH' && mv -f -- docker-compose.yml.new docker-compose.yml && docker compose pull bot && docker compose up -d"
 ```
 
-Before that first `docker compose up -d`, complete the `data/` directory initialization
-and ownership commands in step 5 above. An upgrade replaces only the Compose file and
+Before that first `docker compose up -d`, complete the `data/` directory and PostgreSQL
+ownership initialization in step 5 above. The Compose `permissions` service handles the
+Cookie and log directories automatically. An upgrade replaces only the Compose file and
 reuses the same bind directories; rerun `docker compose config --quiet`, check their
 ownership/mode, then run `docker compose pull bot && docker compose up -d
 --remove-orphans`. This change does not copy data from the old named volumes. If the
@@ -173,7 +174,7 @@ tag. To manually select a version without changing `.env`:
 ```sh
 export BOT_IMAGE=ghcr.io/bespertrijun/rec_tgbot:sha-COMMIT_SHA
 docker compose pull bot
-docker compose up -d --no-deps bot
+docker compose up -d bot
 docker compose ps
 ```
 

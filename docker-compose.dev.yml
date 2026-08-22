@@ -12,6 +12,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  permissions:
+    build: .
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        chown -R 10001:10001 /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs &&
+        find /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs -type d -exec chmod 700 {} + &&
+        find /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs -type f -exec chmod 600 {} +
+    volumes:
+      - reclaude-cookies:/var/lib/reclaude-bot/cookies
+      - reclaude-logs:/var/lib/reclaude-bot/logs
+    restart: "no"
+
   bot:
     build: .
     env_file: .env
@@ -21,6 +36,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      permissions:
+        condition: service_completed_successfully
     volumes:
       - reclaude-cookies:/var/lib/reclaude-bot/cookies
       - reclaude-logs:/var/lib/reclaude-bot/logs

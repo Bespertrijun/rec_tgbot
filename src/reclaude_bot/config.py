@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from functools import lru_cache
+from os import PathLike
 from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -50,6 +51,7 @@ class Settings(BaseSettings):
     member_snapshot_max_age_seconds: int = Field(default=90, alias="MEMBER_SNAPSHOT_MAX_AGE_SECONDS")
     quota_limit_usd: Decimal = Field(default=Decimal("700.00"), alias="QUOTA_LIMIT_USD")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_file_path: Path | None = Field(default=None, alias="LOG_FILE_PATH")
     bind_attempts_per_hour: int = 10
 
     @field_validator("telegram_admin_ids", mode="before")
@@ -65,6 +67,18 @@ class Settings(BaseSettings):
     @classmethod
     def parse_quota(cls, value: object) -> Decimal:
         return Decimal(str(value))
+
+    @field_validator("log_file_path", mode="before")
+    @classmethod
+    def parse_log_file_path(cls, value: object) -> Path | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            return Path(value) if value else None
+        if isinstance(value, PathLike):
+            return Path(value)
+        raise ValueError("LOG_FILE_PATH must be a valid path")
 
     @field_validator("database_url")
     @classmethod

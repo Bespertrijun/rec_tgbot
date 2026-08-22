@@ -11,8 +11,9 @@ the `data/` directory. Because the production file uses Compose's default filena
 commands on the server can use `docker compose pull` and `docker compose up -d` without
 an explicit `-f` argument. Relative mounts are resolved beside that Compose file, so a
 deployment at `/srv/reclaude-bot` stores PostgreSQL data in
-`/srv/reclaude-bot/data/postgres` and the Cookie jar in
-`/srv/reclaude-bot/data/cookies`.
+`/srv/reclaude-bot/data/postgres`, the Cookie jar in
+`/srv/reclaude-bot/data/cookies`, and rotated JSON logs in
+`/srv/reclaude-bot/data/logs`.
 
 ## First-time server setup
 
@@ -50,9 +51,11 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
    this deployment does not automate MFA.
    The Compose file fixes `RECLAUDE_COOKIE_JAR_PATH` to
    `/var/lib/reclaude-bot/cookies/cookies.json` and bind-mounts that directory from
-   `./data/cookies`; do not add this variable to `.env`. The bot uses a normal Linux
-   Chrome browser User-Agent by default, so `RECLAUDE_USER_AGENT` does not need to be
-   configured.
+   `./data/cookies`; do not add this variable to `.env`. It also fixes `LOG_FILE_PATH`
+   to `/var/lib/reclaude-bot/logs/reclaude-bot.log` and bind-mounts `./data/logs`.
+   Persistent file logging is rotated and bounded; stdout remains available through
+   `docker logs`. The bot uses a normal Linux Chrome browser User-Agent by default,
+   so `RECLAUDE_USER_AGENT` does not need to be configured.
 3. From the fixed egress IP, use the dedicated account credentials in the server `.env`.
    The Bot sends `POST /api/auth/login` from this host only during an explicit
    `/account`; successful `Set-Cookie` values are persisted in the `0600` cookie
@@ -62,12 +65,12 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
 4. The published GHCR image is public and can be pulled anonymously. The production
    server does not need a registry token or `docker login`; `docker compose pull` uses
    the default public image directly.
-5. Initialize the two host directories before the first start. Run these commands from
+5. Initialize the host directories before the first start. Run these commands from
    the directory containing `docker-compose.yml` (for example, `/srv/reclaude-bot`):
 
    ```sh
-   install -d -m 700 data data/postgres data/cookies
-   chmod 700 data data/postgres data/cookies
+   install -d -m 700 data data/postgres data/cookies data/logs
+   chmod 700 data data/postgres data/cookies data/logs
    ```
 
    The published bot image runs as UID `10001` (`bot`). The numeric UID/GID of
@@ -78,7 +81,7 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
    POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
    POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
    sudo chown "$POSTGRES_UID:$POSTGRES_GID" data/postgres
-   sudo chown 10001:10001 data/cookies
+   sudo chown -R 10001:10001 data/cookies data/logs
    ```
 
    Do not change the bot to run as root. On rootless Docker, host numeric ownership is
@@ -88,7 +91,7 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
 
    ```sh
    docker compose run --rm --no-deps --user 0 --entrypoint chown bot \
-     10001:10001 /var/lib/reclaude-bot/cookies
+     -R 10001:10001 /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs
    POSTGRES_UID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -u postgres)"
    POSTGRES_GID="$(docker compose run --rm --no-deps --user 0 --entrypoint id db -g postgres)"
    docker compose run --rm --no-deps --user 0 --entrypoint chown db \
@@ -98,8 +101,11 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
    These commands work with rootless Docker because UID `0` is confined to the
    daemon's user namespace; the host sees the corresponding subordinate IDs. If a
    distribution uses a different Postgres image or remaps users, the same `id` commands
-   use the actual image values. Keep the parent `data` directory accessible to the
-   deployment user so Compose can mount it; keep both child directories mode `0700`.
+   use the actual image values. The recursive bot ownership command also repairs files
+   left root-owned by an earlier container; the bot preserves the Cookie jar's `0600`
+   mode when it writes it. Keep the parent `data` directory accessible to the deployment
+   user so Compose can mount it; keep `data/postgres`, `data/cookies`, and `data/logs`
+   mode `0700`.
 
 ## GitHub settings
 
@@ -219,7 +225,7 @@ docker compose exec -T db \
   pg_dump -U bot -d reclaude --format=custom > "backups/reclaude-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 
-Keep dumps and `data/cookies` access-restricted. After restoring a dump, the service
+Keep dumps, `data/cookies`, and `data/logs` access-restricted. After restoring a dump, the service
 must remain write-disabled while operators verify the account, perform a full members
 snapshot and cycle-baseline reconcile, and then explicitly send `/account`.
 See [the Cookie recovery runbook](cookie-runbook.md) and [operations notes](operations.md)

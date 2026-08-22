@@ -21,9 +21,11 @@ services:
       - .env
     environment:
       RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json
+      LOG_FILE_PATH: /var/lib/reclaude-bot/logs/reclaude-bot.log
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - ./data/cookies:/var/lib/reclaude-bot/cookies
+      - ./data/logs:/var/lib/reclaude-bot/logs
     restart: unless-stopped

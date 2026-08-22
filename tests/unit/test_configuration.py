@@ -88,8 +88,18 @@ def test_database_factory_rejects_bypassed_sqlite_settings() -> None:
 def test_compose_uses_project_local_persistent_bind_mounts() -> None:
     compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text()
     assert "RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json" in compose
+    assert "LOG_FILE_PATH: /var/lib/reclaude-bot/logs/reclaude-bot.log" in compose
     assert "- ./data/postgres:/var/lib/postgresql/data" in compose
     assert "- ./data/cookies:/var/lib/reclaude-bot/cookies" in compose
+    assert "- ./data/logs:/var/lib/reclaude-bot/logs" in compose
     assert "postgres-data:" not in compose
     assert "reclaude-cookies:" not in compose
     assert "\nvolumes:\n" not in compose
+
+
+def test_log_file_path_is_optional_and_blank_values_disable_file_logging() -> None:
+    settings = _settings(DATABASE_URL=TEST_DATABASE_URL, LOG_FILE_PATH="  /var/log/reclaude-bot.log  ")
+    assert settings.log_file_path == Path("/var/log/reclaude-bot.log")
+
+    blank = _settings(DATABASE_URL=TEST_DATABASE_URL, LOG_FILE_PATH=" ")
+    assert blank.log_file_path is None

@@ -8,7 +8,7 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY entrypoint.sh ./entrypoint.sh
 RUN pip install --no-cache-dir .
-RUN useradd --create-home --uid 10001 bot && mkdir -p /var/lib/reclaude-bot/cookies \
+RUN useradd --create-home --uid 10001 bot && mkdir -p /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs \
     && chown -R bot:bot /app /var/lib/reclaude-bot
 USER bot
 ENTRYPOINT ["/app/entrypoint.sh"]

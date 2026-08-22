@@ -15,12 +15,17 @@ services:
   bot:
     build: .
     env_file: .env
+    environment:
+      RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json
+      LOG_FILE_PATH: /var/lib/reclaude-bot/logs/reclaude-bot.log
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - reclaude-cookies:/var/lib/reclaude-bot/cookies
+      - reclaude-logs:/var/lib/reclaude-bot/logs
     restart: unless-stopped
 volumes:
   postgres-data:
   reclaude-cookies:
+  reclaude-logs:

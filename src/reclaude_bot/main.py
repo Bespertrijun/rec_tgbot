@@ -26,7 +26,7 @@ from reclaude_bot.logging import configure_logging
 
 async def run() -> None:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_file_path)
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     session_factory = create_session_factory(settings)

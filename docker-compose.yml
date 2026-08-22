@@ -15,20 +15,6 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  permissions:
-    image: ${BOT_IMAGE:-ghcr.io/bespertrijun/rec_tgbot:latest}
-    user: "0:0"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        chown -R 10001:10001 /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs &&
-        find /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs -type d -exec chmod 700 {} + &&
-        find /var/lib/reclaude-bot/cookies /var/lib/reclaude-bot/logs -type f -exec chmod 600 {} +
-    volumes:
-      - ./data/cookies:/var/lib/reclaude-bot/cookies
-      - ./data/logs:/var/lib/reclaude-bot/logs
-    restart: "no"
-
   bot:
     image: ${BOT_IMAGE:-ghcr.io/bespertrijun/rec_tgbot:latest}
     env_file:
@@ -39,8 +25,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      permissions:
-        condition: service_completed_successfully
     volumes:
       - ./data/cookies:/var/lib/reclaude-bot/cookies
       - ./data/logs:/var/lib/reclaude-bot/logs

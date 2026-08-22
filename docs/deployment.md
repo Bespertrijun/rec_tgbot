@@ -74,12 +74,13 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
    ```
 
    Compose creates missing `data/cookies` and `data/logs` bind-mount directories as
-   needed. Before the bot starts, the one-shot `permissions` service runs the published
-   bot image as `user: "0:0"`, recursively assigns both directories and their existing
-   contents to UID/GID `10001:10001`, sets directories to `0700`, and sets existing files
-   to `0600`. It exits after this initialization; the long-running `bot` service remains
-   UID `10001` and depends on its successful completion. Do not run the bot as root or
-   weaken either directory to `0777`.
+   needed; no manual `chown` is needed for these bot directories. The image entrypoint
+   starts briefly as root, recursively assigns both
+   directories and their existing contents to UID/GID `10001:10001`, sets directories to
+   `0700`, and sets existing files to `0600`. It then uses `gosu` to run migrations and
+   the long-running bot as UID `10001`; if any repair or privilege drop fails, startup
+   exits instead of bypassing the check. Do not run the bot as root or weaken either
+   directory to `0777`.
 
    The numeric UID/GID of `postgres:16-alpine` is image-specific, so read it from the
    exact image before assigning the PostgreSQL bind directory. With the usual rootful
@@ -104,8 +105,8 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
 
    If a distribution uses a different Postgres image or remaps users, the same `id`
    commands use the actual image values. Keep the parent `data` directory accessible to
-   the deployment user so Compose can mount it; the `permissions` service owns and
-   restricts `data/cookies` and `data/logs` automatically.
+   the deployment user so Compose can mount it; the image entrypoint owns and restricts
+   `data/cookies` and `data/logs` automatically.
 
 ## GitHub settings
 
@@ -150,8 +151,8 @@ ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
 ```
 
 Before that first `docker compose up -d`, complete the `data/` directory and PostgreSQL
-ownership initialization in step 5 above. The Compose `permissions` service handles the
-Cookie and log directories automatically. An upgrade replaces only the Compose file and
+ownership initialization in step 5 above. The image entrypoint handles the Cookie and
+log directories automatically. An upgrade replaces only the Compose file and
 reuses the same bind directories; rerun `docker compose config --quiet`, check their
 ownership/mode, then run `docker compose pull bot && docker compose up -d
 --remove-orphans`. This change does not copy data from the old named volumes. If the

@@ -6,8 +6,23 @@ from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import ArgumentError
 
 from reclaude_bot.infrastructure.reclaude.constants import DEFAULT_RECLAUDE_USER_AGENT
+
+POSTGRESQL_ASYNCPG_DRIVER = "postgresql+asyncpg"
+
+
+def validate_postgresql_database_url(value: str) -> str:
+    """Require the production async PostgreSQL dialect without echoing credentials."""
+    try:
+        parsed: URL = make_url(value)
+    except (ArgumentError, TypeError, ValueError) as exc:
+        raise ValueError("DATABASE_URL must be a valid postgresql+asyncpg URL") from exc
+    if parsed.drivername != POSTGRESQL_ASYNCPG_DRIVER or not parsed.host or not parsed.database:
+        raise ValueError("DATABASE_URL must use postgresql+asyncpg:// with a host and database")
+    return value
 
 
 class Settings(BaseSettings):
@@ -20,7 +35,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_admin_ids: list[int] = Field(default_factory=list, alias="TELEGRAM_ADMIN_IDS")
-    database_url: str = Field(default="sqlite+aiosqlite:///./reclaude.db", alias="DATABASE_URL")
+    database_url: str = Field(alias="DATABASE_URL")
     reclaude_base_url: str = Field(default="https://reclaude.example", alias="RECLAUDE_BASE_URL")
     reclaude_org_id: int = Field(default=178, alias="RECLAUDE_ORG_ID")
     reclaude_login_email: str = Field(default="", alias="RECLAUDE_LOGIN_EMAIL")
@@ -51,6 +66,11 @@ class Settings(BaseSettings):
     def parse_quota(cls, value: object) -> Decimal:
         return Decimal(str(value))
 
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        return validate_postgresql_database_url(value)
+
     @model_validator(mode="after")
     def validate_login_credentials(self) -> Settings:
         email_set = bool(self.reclaude_login_email.strip())
@@ -62,4 +82,4 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]  # DATABASE_URL is supplied by the environment/.env

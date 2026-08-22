@@ -4,11 +4,12 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from reclaude_bot.config import Settings
+from reclaude_bot.config import Settings, validate_postgresql_database_url
 
 
 def create_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]:
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    database_url = validate_postgresql_database_url(settings.database_url)
+    engine = create_async_engine(database_url, pool_pre_ping=True)
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 

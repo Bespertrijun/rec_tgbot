@@ -10,6 +10,14 @@ class EligibilityError(DomainError):
     pass
 
 
+class GroupError(DomainError):
+    pass
+
+
+class OnboardingError(DomainError):
+    pass
+
+
 class UpstreamError(DomainError):
     pass
 

@@ -76,7 +76,7 @@ def test_accounts_use_account_id_and_keep_record_id_distinct() -> None:
 
 
 def test_admin_recovery_commands_share_account_handler() -> None:
-    router = build_admin_router(Settings(TELEGRAM_ADMIN_IDS=[1]))
+    router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
     matching = [handler for handler in router.message.handlers if handler.callback.__name__ == "recovery_enable"]
     assert len(matching) == 1
     filters = matching[0].filters

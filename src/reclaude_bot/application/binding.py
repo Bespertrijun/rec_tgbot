@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
+from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, UserStatus
 from reclaude_bot.domain.errors import BindingError
@@ -33,11 +34,13 @@ class BindingService:
         gateway: ReclaudeGateway | None = None,
         attempts_per_hour: int = 10,
         gate: RecoveryGate | None = None,
+        onboarding: OnboardingService | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.gateway = gateway
         self.attempts_per_hour = attempts_per_hour
         self.gate = gate
+        self.onboarding = onboarding
         self._attempts: dict[int, deque[datetime]] = defaultdict(deque)
 
     def _check_rate(self, telegram_user_id: int, now: datetime) -> None:
@@ -57,6 +60,7 @@ class BindingService:
         normalized = normalize_email(email)
         if "@" not in normalized or len(normalized) > 320:
             raise BindingError("邮箱格式无效")
+        result: User | None = None
         async with self.session_factory() as session:
             async with session.begin():
                 member = await session.scalar(select(UpstreamMember).where(UpstreamMember.email_normalized == normalized))
@@ -91,44 +95,55 @@ class BindingService:
                             target_id=str(existing_tg.id),
                             parameters_summary={"email": masked_email(email), "reclaude_user_id": member.reclaude_user_id},
                         )
-                        return existing_tg
-                    if existing.telegram_user_id == telegram_user_id and existing.email_normalized == normalized and existing.reclaude_user_id == member.reclaude_user_id:
-                        return existing
-                    raise BindingError("该绑定已被占用，请联系管理员")
-                row = User(
-                    telegram_user_id=telegram_user_id,
-                    email=email.strip(),
-                    email_normalized=normalized,
-                    reclaude_user_id=member.reclaude_user_id,
-                    binding_status=BindingStatus.BOUND.value,
-                    status=UserStatus.ACTIVE.value,
-                    baseline_status=BaselineStatus.UNKNOWN.value,
-                    bound_at=now,
-                    updated_at=now,
-                )
-                session.add(row)
-                try:
-                    await session.flush()
-                except IntegrityError as exc:
-                    raise BindingError("该绑定已被占用，请联系管理员") from exc
-                cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at > now).order_by(QuotaCycle.reset_at.asc()))
-                if cycle is not None:
-                    baseline = await session.scalar(
-                        select(CycleBaseline).where(CycleBaseline.reclaude_user_id == member.reclaude_user_id, CycleBaseline.cycle_id == cycle.id)
+                        result = existing_tg
+                    elif existing.telegram_user_id == telegram_user_id and existing.email_normalized == normalized and existing.reclaude_user_id == member.reclaude_user_id:
+                        result = existing
+                    else:
+                        raise BindingError("该绑定已被占用，请联系管理员")
+                else:
+                    row = User(
+                        telegram_user_id=telegram_user_id,
+                        email=email.strip(),
+                        email_normalized=normalized,
+                        reclaude_user_id=member.reclaude_user_id,
+                        binding_status=BindingStatus.BOUND.value,
+                        status=UserStatus.ACTIVE.value,
+                        baseline_status=BaselineStatus.UNKNOWN.value,
+                        bound_at=now,
+                        updated_at=now,
                     )
-                    if baseline is not None:
-                        baseline.user_id = row.id
-                        row.baseline_status = baseline.status
-                await audit(
-                    session,
-                    actor_telegram_id=telegram_user_id,
-                    actor_type="USER",
-                    action="BIND",
-                    target_type="USER",
-                    target_id=str(row.id),
-                    parameters_summary={"email": masked_email(email), "reclaude_user_id": member.reclaude_user_id},
-                )
-                return row
+                    session.add(row)
+                    try:
+                        await session.flush()
+                    except IntegrityError as exc:
+                        raise BindingError("该绑定已被占用，请联系管理员") from exc
+                    cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at > now).order_by(QuotaCycle.reset_at.asc()))
+                    if cycle is not None:
+                        baseline = await session.scalar(
+                            select(CycleBaseline).where(CycleBaseline.reclaude_user_id == member.reclaude_user_id, CycleBaseline.cycle_id == cycle.id)
+                        )
+                        if baseline is not None:
+                            baseline.user_id = row.id
+                            row.baseline_status = baseline.status
+                    await audit(
+                        session,
+                        actor_telegram_id=telegram_user_id,
+                        actor_type="USER",
+                        action="BIND",
+                        target_type="USER",
+                        target_id=str(row.id),
+                        parameters_summary={"email": masked_email(email), "reclaude_user_id": member.reclaude_user_id},
+                    )
+                    result = row
+        assert result is not None
+        if self.onboarding is not None:
+            try:
+                await self.onboarding.queue_unmute_for_user(telegram_user_id)
+            except Exception:
+                # The binding commit remains authoritative; reconciliation will
+                # repair the pending Telegram action after a restart or retry.
+                pass
+        return result
 
     async def unbind(self, telegram_user_id: int, *, operator_telegram_id: int, force_revoke: bool = False) -> None:
         async with self.session_factory() as session:

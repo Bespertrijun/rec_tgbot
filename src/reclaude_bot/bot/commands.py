@@ -22,6 +22,7 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("unban", "解禁用户"),
     ("unbind", "解绑用户"),
     ("audit", "查看审计记录"),
+    ("groups", "查看托管群组"),
     ("account", "恢复并校验 Reclaude 账号"),
     ("recovery_enable", "兼容旧版恢复命令"),
 )

@@ -94,3 +94,121 @@ def test_postgresql_append_only_ddl_is_explicit_and_reversible() -> None:
     assert "BEFORE UPDATE OR DELETE ON audit_logs" in source
     assert "EXECUTE FUNCTION audit_logs_append_only_guard()" in source
     assert "DROP FUNCTION IF EXISTS audit_logs_append_only_guard()" in source
+
+
+def test_sqlite_group_onboarding_schema_is_reversible(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "group-onboarding.db"
+    config = _alembic_config(database)
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        database_inspector = inspect(engine)
+        assert database_inspector.has_table("managed_groups")
+        assert database_inspector.has_table("group_memberships")
+
+        managed_group_columns = {column["name"]: column for column in database_inspector.get_columns("managed_groups")}
+        assert {
+            "chat_id",
+            "title",
+            "status",
+            "discovered_by_telegram_id",
+            "approved_by_telegram_id",
+            "bot_permissions",
+            "disable_reason",
+            "approved_at",
+            "disabled_at",
+            "created_at",
+            "updated_at",
+        } <= managed_group_columns.keys()
+        assert "BIGINT" in str(managed_group_columns["chat_id"]["type"]).upper()
+
+        membership_columns = {column["name"]: column for column in database_inspector.get_columns("group_memberships")}
+        assert {
+            "chat_id",
+            "telegram_user_id",
+            "generation",
+            "joined_at",
+            "deadline",
+            "state",
+            "bound_at",
+            "unmute_requested_at",
+            "unmuted_at",
+            "removal_requested_at",
+            "removed_at",
+            "verification_token_hash",
+            "pending_action",
+            "action_attempt_id",
+            "retry_count",
+            "last_attempt_at",
+            "next_retry_at",
+            "last_error",
+            "created_at",
+            "updated_at",
+        } <= membership_columns.keys()
+        assert "BIGINT" in str(membership_columns["telegram_user_id"]["type"]).upper()
+
+        managed_group_constraints = {
+            constraint["name"] for constraint in database_inspector.get_unique_constraints("managed_groups")
+        }
+        membership_constraints = {
+            constraint["name"] for constraint in database_inspector.get_unique_constraints("group_memberships")
+        }
+        assert "uq_managed_groups_chat_id" in managed_group_constraints
+        assert "uq_group_memberships_chat_user" in membership_constraints
+
+        index_names = {
+            index["name"]
+            for table in ("managed_groups", "group_memberships")
+            for index in database_inspector.get_indexes(table)
+        }
+        assert {
+            "ix_managed_groups_status",
+            "ix_group_memberships_state_deadline",
+            "ix_group_memberships_user_state",
+            "ix_group_memberships_retry",
+        } <= index_names
+
+        foreign_keys = database_inspector.get_foreign_keys("group_memberships")
+        assert any(
+            foreign_key["referred_table"] == "managed_groups"
+            and foreign_key["constrained_columns"] == ["chat_id"]
+            and foreign_key["referred_columns"] == ["chat_id"]
+            for foreign_key in foreign_keys
+        )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO managed_groups
+                        (chat_id, title, status, bot_permissions, created_at, updated_at)
+                    VALUES (-100123, 'Test group', 'PENDING', '{}',
+                            '2026-08-19T00:00:00+00:00', '2026-08-19T00:00:00+00:00')
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO group_memberships
+                        (chat_id, telegram_user_id, joined_at, deadline, created_at, updated_at)
+                    VALUES (-100123, 9223372036854770000,
+                            '2026-08-19T00:00:00+00:00', '2026-08-19T00:05:00+00:00',
+                            '2026-08-19T00:00:00+00:00', '2026-08-19T00:00:00+00:00')
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0002_recovery_audit")
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        assert not inspect(engine).has_table("group_memberships")
+        assert not inspect(engine).has_table("managed_groups")
+    finally:
+        engine.dispose()

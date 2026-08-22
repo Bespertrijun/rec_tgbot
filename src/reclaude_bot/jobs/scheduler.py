@@ -7,24 +7,30 @@ import structlog
 
 from reclaude_bot.application.actions import QuotaActionService
 from reclaude_bot.application.quota import QuotaService
+from reclaude_bot.jobs.onboarding import OnboardingWorker
 from reclaude_bot.jobs.usage_poll import poll_once
 
 log = structlog.get_logger(__name__)
 
 
 class BackgroundJobs:
-    def __init__(self, quota: QuotaService, actions: QuotaActionService) -> None:
+    def __init__(self, quota: QuotaService, actions: QuotaActionService, onboarding: OnboardingWorker | None = None) -> None:
         self.quota = quota
         self.actions = actions
+        self.onboarding = onboarding
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         self._stop.clear()
+        if self.onboarding is not None:
+            await self.onboarding.start()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
         self._stop.set()
+        if self.onboarding is not None:
+            await self.onboarding.stop()
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)

@@ -1,5 +1,9 @@
 # Production Deployment
 
+The bot runtime is PostgreSQL-only. `DATABASE_URL` must be an async SQLAlchemy URL with the
+`postgresql+asyncpg://` scheme; startup rejects SQLite and synchronous PostgreSQL URLs. SQLite
+remains available only for isolated test fixtures and migration checks.
+
 The production host runs the published image with Docker Compose and keeps its
 configuration and runtime data in the deployment directory. The GitHub deployment job
 uploads only `docker-compose.yml`; it never uploads or overwrites the server `.env` or

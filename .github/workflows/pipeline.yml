@@ -20,10 +20,26 @@ jobs:
   quality:
     name: Python ${{ matrix.python-version }} checks
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: reclaude_test
+          POSTGRES_USER: bot
+          POSTGRES_PASSWORD: ci-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bot -d reclaude_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://bot:ci-test-password@localhost:5432/reclaude_test
     steps:
       - name: Check out source
         uses: actions/checkout@v4

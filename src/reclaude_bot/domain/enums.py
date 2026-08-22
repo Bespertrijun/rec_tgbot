@@ -32,3 +32,21 @@ class QuotaRevocationStatus(StrEnum):
     REVOKED = "REVOKED"
     PENDING_RESTORE = "PENDING_RESTORE"
     RESTORED = "RESTORED"
+
+
+class ManagedGroupStatus(StrEnum):
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    REJECTED = "REJECTED"
+
+
+class GroupMembershipState(StrEnum):
+    RESTRICT_PENDING = "RESTRICT_PENDING"
+    MUTED = "MUTED"
+    UNMUTE_PENDING = "UNMUTE_PENDING"
+    ACTIVE = "ACTIVE"
+    REMOVE_PENDING = "REMOVE_PENDING"
+    REMOVED = "REMOVED"
+    LEFT = "LEFT"
+    EXEMPT = "EXEMPT"

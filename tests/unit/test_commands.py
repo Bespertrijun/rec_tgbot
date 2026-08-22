@@ -42,6 +42,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
             {"command": "unban", "description": "解禁用户"},
             {"command": "unbind", "description": "解绑用户"},
             {"command": "audit", "description": "查看审计记录"},
+            {"command": "groups", "description": "查看托管群组"},
             {"command": "account", "description": "恢复并校验 Reclaude 账号"},
             {"command": "recovery_enable", "description": "兼容旧版恢复命令"},
         ]

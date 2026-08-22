@@ -214,9 +214,13 @@ async def test_password_login_fails_closed_when_cookie_cannot_be_persisted(monke
 def test_login_credentials_must_be_complete_and_secret_is_masked() -> None:
     password = "settings-password"
     with pytest.raises(ValidationError) as caught:
-        Settings(RECLAUDE_LOGIN_PASSWORD=SecretStr(password))
+        Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", RECLAUDE_LOGIN_PASSWORD=SecretStr(password))
     assert password not in str(caught.value)
-    settings = Settings(RECLAUDE_LOGIN_EMAIL="owner@example.com", RECLAUDE_LOGIN_PASSWORD=SecretStr(password))
+    settings = Settings(
+        DATABASE_URL="postgresql+asyncpg://test:test@localhost/test",
+        RECLAUDE_LOGIN_EMAIL="owner@example.com",
+        RECLAUDE_LOGIN_PASSWORD=SecretStr(password),
+    )
     assert settings.reclaude_login_password.get_secret_value() == password
     assert password not in repr(settings)
     with pytest.raises(ValueError, match="configured together"):

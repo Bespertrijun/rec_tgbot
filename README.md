@@ -1,7 +1,8 @@
 # Reclaude Quota Bot
 
 Single-process Telegram bot for binding Reclaude members and enforcing a configurable
-cycle quota from the upstream members snapshot. It uses a PostgreSQL database and a
+cycle quota from the upstream members snapshot. It uses PostgreSQL exclusively at runtime
+through the required `postgresql+asyncpg://` URL and a
 dedicated, persistent Reclaude session. No SMTP, email verification, API key, or port 25
 is required.
 

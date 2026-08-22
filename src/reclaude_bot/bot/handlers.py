@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from decimal import Decimal, InvalidOperation
 
 from aiogram import Router
@@ -8,26 +9,65 @@ from aiogram.types import Message
 
 from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
+from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryService
+from reclaude_bot.bot.middleware import GroupAccessMiddleware
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError
 
 
 def build_router(settings: Settings) -> Router:
     router = Router(name="user")
+    router.message.middleware(GroupAccessMiddleware())
 
     @router.message(Command("start"))
-    async def start(message: Message) -> None:
+    async def start(
+        message: Message,
+        command: CommandObject | None = None,
+        onboarding: OnboardingService | None = None,
+    ) -> None:
+        payload = command.args if command is not None else None
+        if payload and payload.startswith("verify_"):
+            if onboarding is None or message.chat.type != "private" or message.from_user is None:
+                await message.answer("验证链接只能在 Bot 私聊中使用。")
+                return
+            try:
+                membership = await onboarding.verify_token(message.from_user.id, payload)
+            except DomainError:
+                membership = None
+            if membership is None:
+                await message.answer("验证链接无效或已过期，请从群组重新获取验证消息。")
+                return
+            if await onboarding.is_bound_active(message.from_user.id):
+                await onboarding.queue_unmute_for_user(message.from_user.id)
+                await message.answer("验证成功，群组权限正在恢复，请稍候。")
+            else:
+                await message.answer("验证成功，请在此私聊中发送 /bind <邮箱> 完成绑定。")
+            return
         await message.answer("请使用 /bind 邮箱 或 /status。")
 
     @router.message(Command("bind"))
-    async def bind(message: Message, command: CommandObject, binding: BindingService) -> None:
+    async def bind(
+        message: Message,
+        command: CommandObject,
+        binding: BindingService,
+        onboarding: OnboardingService | None = None,
+    ) -> None:
         try:
             if message.from_user is None or not command.args:
                 raise ValueError
             user = await binding.bind(message.from_user.id, command.args.strip(), private_chat=message.chat.type == "private")
-            await message.answer(f"绑定成功：{user.email}")
+            pending = True
+            if onboarding is not None:
+                try:
+                    pending = bool(await onboarding.queue_unmute_for_user(message.from_user.id))
+                except Exception:
+                    pending = True
+            if pending:
+                await message.answer(f"绑定成功：{html.escape(user.email)}\n群组权限正在恢复，完成后即可发言。")
+            else:
+                await message.answer(f"绑定成功：{html.escape(user.email)}")
         except (DomainError, ValueError):
             await message.answer("绑定失败：请确认已完成首次成员同步、邮箱存在且未被占用。")
 
@@ -56,6 +96,7 @@ def build_router(settings: Settings) -> Router:
 
 def build_admin_router(settings: Settings) -> Router:
     router = Router(name="admin")
+    router.message.middleware(GroupAccessMiddleware())
 
     def is_admin(message: Message) -> bool:
         return message.from_user is not None and message.from_user.id in settings.telegram_admin_ids

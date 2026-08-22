@@ -7,7 +7,15 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, CycleStatus, QuotaRevocationStatus, UserStatus
+from reclaude_bot.domain.enums import (
+    BaselineStatus,
+    BindingStatus,
+    CycleStatus,
+    GroupMembershipState,
+    ManagedGroupStatus,
+    QuotaRevocationStatus,
+    UserStatus,
+)
 
 from .base import Base
 
@@ -144,4 +152,60 @@ class ServiceState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     reason: Mapped[str] = mapped_column(String(128), default="startup_recovery_required", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ManagedGroup(Base):
+    __tablename__ = "managed_groups"
+    __table_args__ = (
+        UniqueConstraint("chat_id", name="uq_managed_groups_chat_id"),
+        Index("ix_managed_groups_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default=ManagedGroupStatus.PENDING.value, nullable=False)
+    discovered_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    approved_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    bot_permissions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    disable_reason: Mapped[str | None] = mapped_column(Text)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class GroupMembership(Base):
+    __tablename__ = "group_memberships"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "telegram_user_id", name="uq_group_memberships_chat_user"),
+        Index("ix_group_memberships_state_deadline", "state", "deadline"),
+        Index("ix_group_memberships_user_state", "telegram_user_id", "state"),
+        Index("ix_group_memberships_retry", "state", "next_retry_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("managed_groups.chat_id", ondelete="CASCADE"), nullable=False)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(32), default=GroupMembershipState.RESTRICT_PENDING.value, nullable=False)
+    bound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unmute_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unmuted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    removal_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_token_hash: Mapped[str | None] = mapped_column(String(128))
+    verification_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pending_action: Mapped[str | None] = mapped_column(String(32))
+    action_attempt_id: Mapped[str | None] = mapped_column(String(64))
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_alerted_retry_count: Mapped[int | None] = mapped_column(Integer)
+    last_alerted_action: Mapped[str | None] = mapped_column(String(32))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

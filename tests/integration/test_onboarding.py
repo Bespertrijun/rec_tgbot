@@ -1024,7 +1024,7 @@ async def test_postgresql_concurrent_multigroup_unmute_and_removal_have_single_w
                 )
             ).all()
         )
-    assert [row.chat_id for row in rows] == [first_chat_id, second_chat_id]
+    assert [row.chat_id for row in rows] == sorted([first_chat_id, second_chat_id])
     assert all(row.state == GroupMembershipState.UNMUTE_PENDING.value for row in rows)
     assert all(row.pending_action is None and row.action_attempt_id is None for row in rows)
     assert all(row.retry_count == 0 and row.last_error is None for row in rows)

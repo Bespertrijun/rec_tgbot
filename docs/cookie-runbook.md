@@ -11,11 +11,16 @@
 3. Keep the external cookie jar outside the repository with mode `0600` and readable only by
    the Bot user. Host mode `0600` does not prevent `root`, a rootful Docker daemon, or a
    privileged container process from reading the `.env` or jar.
-4. Run `/account`. It authenticates first, verifies `GET /api/app/me`, then reads `/accounts`
-   and `/members`; it verifies a single bound account whose health is non-empty and not
-   `banned`, the unique `weekly_all` cycle, and member assignment state. The recovery command discovers the
-   account's `account_id` from `/accounts` (the record's separate `id` is not used); no
+4. Run `/account` to authenticate and inspect the live `/accounts` inventory. This is
+   read-only and still displays a banned `current_account` so an operator can choose a
+   healthy bound account. Run `/use <account_id>` for the selected record; it validates the
+   lifecycle, health, and ID, then reconciles `GET /api/app/me`, the weekly cycle, and
+   `/members` before persisting the selection; writes remain disabled until `/starttask`. The legacy
+   `/recovery_enable` alias retains the single-bound-account discovery flow. Account IDs
+   come from each record's `account_id` (the separate database `id` is never used); no
    account ID or email mask is configured in `.env`.
-5. Inspect pending quota revocations. An administrator may resume quota enforcement writes only
-   after the checks pass. The first `401` opens the circuit again and requires this procedure;
-   normal polling and write requests never retry the password login automatically.
+5. Inspect pending quota revocations. `/starttask` is the only command that may resume quota
+   enforcement writes after the checks pass; `/use` only selects and reconciles the account.
+   `/stoptask` closes both writes and the quota loop. The first `401` forces the durable task back
+   to `STOPPED` and requires this procedure; normal polling and write requests never retry the
+   password login automatically.

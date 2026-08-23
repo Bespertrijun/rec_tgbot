@@ -1,12 +1,15 @@
 import json
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
 
 from reclaude_bot.bot.handlers import build_admin_router
 from reclaude_bot.config import Settings
+from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.infrastructure.reclaude.models import AccountsResponse, MembersResponse, MeResponse
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -82,3 +85,16 @@ def test_admin_recovery_commands_share_account_handler() -> None:
     filters = matching[0].filters
     assert filters is not None
     assert getattr(filters[0].callback, "commands", None) == ("account", "recovery_enable")
+
+
+@pytest.mark.asyncio
+async def test_use_account_escapes_domain_error_for_html_mode() -> None:
+    router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
+    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "use_account")
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    command = type("Command", (), {"args": "4949"})()
+    recovery = SimpleNamespace(select_account=AsyncMock(side_effect=EligibilityError("invalid <account> & status")))
+
+    await handler(message, command, recovery)
+
+    message.answer.assert_awaited_once_with("账号选择失败：invalid &lt;account&gt; &amp; status")

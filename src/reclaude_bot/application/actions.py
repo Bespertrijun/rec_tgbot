@@ -14,7 +14,7 @@ from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import CycleStatus, QuotaRevocationStatus, UserStatus
 from reclaude_bot.domain.quota import cycle_used, ensure_utc, is_last_24h
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaRevocation, UpstreamMember, User
+from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaRevocation, QuotaTaskMember, ServiceState, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 
 log = structlog.get_logger(__name__)
@@ -39,7 +39,9 @@ class QuotaActionService:
         self._lock = asyncio.Lock()
 
     async def _writes_allowed(self) -> bool:
-        return self.gate is None or await self.gate.is_enabled()
+        if self.gate is None:
+            return True
+        return await self.gate.is_task_enabled() and await self.gate.is_enabled()
 
     async def _notify(self, message: str) -> None:
         if self.alert_callback:
@@ -191,11 +193,30 @@ class QuotaActionService:
     async def reconcile_cached(self, *, now: datetime | None = None) -> int:
         moment = ensure_utc(now or utcnow())
         async with self._lock:
+            if self.gate is not None and not await self.gate.is_task_enabled():
+                return 0
             async with self.session_factory() as session:
                 cycle = await self.quota.current_cycle(session, moment)
                 if cycle is None:
                     return 0
-                user_ids = list((await session.scalars(select(User.id).where(User.binding_status == "BOUND", User.status == UserStatus.ACTIVE.value))).all())
+                state = await session.get(ServiceState, 1)
+                if state is not None and state.quota_task_scope_mode == "ALLOWLIST":
+                    scoped_ids = list((await session.scalars(select(QuotaTaskMember.reclaude_user_id))).all())
+                    if not scoped_ids:
+                        return 0
+                    user_ids = list(
+                        (
+                            await session.scalars(
+                                select(User.id).where(
+                                    User.binding_status == "BOUND",
+                                    User.status == UserStatus.ACTIVE.value,
+                                    User.reclaude_user_id.in_(scoped_ids),
+                                )
+                            )
+                        ).all()
+                    )
+                else:
+                    user_ids = list((await session.scalars(select(User.id).where(User.binding_status == "BOUND", User.status == UserStatus.ACTIVE.value))).all())
             actions = 0
             for user_id in user_ids:
                 action = await self._prepare_action(user_id, now=moment)

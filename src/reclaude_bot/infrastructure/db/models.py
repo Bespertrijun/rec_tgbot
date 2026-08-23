@@ -152,7 +152,22 @@ class ServiceState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     reason: Mapped[str] = mapped_column(String(128), default="startup_recovery_required", nullable=False)
+    selected_account_id: Mapped[str | None] = mapped_column(String(128))
+    quota_task_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    quota_task_scope_mode: Mapped[str] = mapped_column(String(16), default="ALL", nullable=False)
+    quota_task_updated_by: Mapped[int | None] = mapped_column(BigInteger)
+    quota_task_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class QuotaTaskMember(Base):
+    __tablename__ = "quota_task_members"
+    __table_args__ = (UniqueConstraint("reclaude_user_id", name="uq_quota_task_members_reclaude_user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reclaude_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    added_by: Mapped[int | None] = mapped_column(BigInteger)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ManagedGroup(Base):

@@ -13,6 +13,7 @@ from reclaude_bot.application.groups import GroupService
 from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
+from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.bot.commands import register_command_menus
 from reclaude_bot.bot.groups import TelegramGroupGateway, build_group_router
 from reclaude_bot.bot.handlers import build_admin_router, build_router
@@ -31,7 +32,7 @@ async def run() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     session_factory = create_session_factory(settings)
     gate = RecoveryGate(session_factory)
-    await gate.ensure_disabled()
+    startup_state = await gate.ensure_disabled()
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     group_gateway = TelegramGroupGateway(bot)
     groups = GroupService(session_factory, group_gateway, settings.telegram_admin_ids)
@@ -70,13 +71,17 @@ async def run() -> None:
     )
     binding = BindingService(session_factory, gateway, settings.bind_attempts_per_hour, gate=gate, onboarding=onboarding)
     recovery = RecoveryService(gate, quota, gateway, settings)
+    await recovery.restore_persisted_account(startup_state)
     admin = AdminService(session_factory, quota, actions)
-    jobs = BackgroundJobs(quota, actions, onboarding_worker)
+    task = QuotaTaskService(session_factory, gateway)
+    jobs = BackgroundJobs(quota, actions, onboarding_worker, task_service=task)
     dp = Dispatcher()
     dp["binding"] = binding
     dp["quota"] = quota
     dp["actions"] = actions
     dp["recovery"] = recovery
+    dp["task"] = task
+    dp["jobs"] = jobs
     dp["admin"] = admin
     dp["groups"] = groups
     dp["onboarding"] = onboarding
@@ -86,7 +91,14 @@ async def run() -> None:
     dp.include_router(build_group_router(settings))
     try:
         await register_command_menus(bot, settings.telegram_admin_ids)
-        await jobs.start()
+        await jobs.start(start_quota=False)
+        if startup_state.quota_task_enabled:
+            try:
+                await recovery.validate_selected_account()
+                await jobs.resume_quota_task()
+            except Exception as exc:
+                await gate.force_stop("startup_task_validation_failed")
+                await operational_alert(f"限额任务启动校验失败，已保持 STOPPED：{exc}")
         allowed_updates = dp.resolve_used_update_types()
         await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:

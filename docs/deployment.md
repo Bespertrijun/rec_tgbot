@@ -163,8 +163,10 @@ the new empty bind directory contains that data.
 The automated job follows the same sequence and pins `BOT_IMAGE` to the commit SHA. It
 only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose ps`
 shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
-restore, complete the read-only checks and send `/account` from an administrator
-account before allowing quota writes.
+restore, complete the read-only checks with `/account`, explicitly select and reconcile a
+healthy account with `/use <account_id>`, then send `/starttask` from an administrator account
+to enable quota writes. `/stoptask` persists the stopped state across restarts; group onboarding
+continues while the quota task is stopped.
 
 ## Upgrade and rollback
 
@@ -179,8 +181,8 @@ docker compose up -d bot
 docker compose ps
 ```
 
-Use the previous known-good SHA for a rollback. Re-run the health/reconcile checks and
-`/account` after either operation. Never roll back by copying a Cookie or `.env`
+Use the previous known-good SHA for a rollback. Re-run `/account`, `/use <account_id>`, and
+`/starttask` only after reviewing the persisted task state and account health. Never roll back by copying a Cookie or `.env`
 from another host.
 
 ## Inspecting and retiring old named volumes

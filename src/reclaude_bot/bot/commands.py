@@ -23,7 +23,13 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("unbind", "解绑用户"),
     ("audit", "查看审计记录"),
     ("groups", "查看托管群组"),
-    ("account", "恢复并校验 Reclaude 账号"),
+    ("account", "查看 Reclaude 实时账号"),
+    ("use", "选择并同步 Reclaude 账号"),
+    ("task", "查看限额任务状态"),
+    ("starttask", "启动限额任务"),
+    ("stoptask", "停止限额任务"),
+    ("addtaskmember", "加入限额任务成员"),
+    ("deletetaskmember", "移除限额任务成员"),
     ("recovery_enable", "兼容旧版恢复命令"),
 )
 

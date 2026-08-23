@@ -65,6 +65,7 @@ def test_sqlite_upgrade_enforces_append_only_and_downgrade_cleans_up(tmp_path, m
                 connection.execute(text("DELETE FROM audit_logs WHERE id = 1"))
 
         assert inspect(engine).has_table("service_state")
+        assert "selected_account_id" in {column["name"] for column in inspect(engine).get_columns("service_state")}
     finally:
         engine.dispose()
 
@@ -85,6 +86,40 @@ def test_sqlite_upgrade_enforces_append_only_and_downgrade_cleans_up(tmp_path, m
     finally:
         engine.dispose()
 
+
+def test_quota_task_migration_backfills_previous_write_state(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "quota-task-backfill.db"
+    config = _alembic_config(database)
+
+    command.upgrade(config, "0004_selected_account")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO service_state
+                        (id, write_enabled, reason, updated_at, selected_account_id)
+                    VALUES (1, 1, 'operator_enabled_after_reconcile',
+                            '2026-08-19T00:00:00+00:00', '4949')
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            state = connection.execute(
+                text("SELECT quota_task_enabled, quota_task_scope_mode FROM service_state WHERE id = 1")
+            ).one()
+            assert state.quota_task_enabled == 1
+            assert state.quota_task_scope_mode == "ALL"
+    finally:
+        engine.dispose()
 
 def test_postgresql_append_only_ddl_is_explicit_and_reversible() -> None:
     source = MIGRATION.read_text()

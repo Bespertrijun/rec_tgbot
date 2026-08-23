@@ -12,7 +12,7 @@ from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.domain.enums import BaselineStatus, QuotaRevocationStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
+from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import Member
 from reclaude_bot.jobs.usage_poll import poll_once
 
@@ -53,7 +53,7 @@ async def test_status_is_cache_only_and_used_uses_dynamic_limit(app_context):
 
 
 @pytest.mark.asyncio
-async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
+async def test_recovery_health_checks_accounts_without_enabling_task(app_context):
     factory, gateway, settings = app_context
     gateway.account_rows = [
         {
@@ -79,12 +79,170 @@ async def test_recovery_health_checks_accounts_and_enables_gate(app_context):
     assert gateway.accounts_calls == 1
     assert gateway.members_calls == 1
     assert gateway.account_id == 8123
-    assert await gate.is_enabled()
+    assert await gate.is_enabled() is False
     async with factory() as session:
         state = await session.get(ServiceState, 1)
-        assert state.write_enabled is True
+        assert state.write_enabled is False
+        assert state.quota_task_enabled is False
+        assert state.selected_account_id == "8123"
+        audit_row = await session.scalar(select(AuditLog).where(AuditLog.action == "SELECT_ACCOUNT"))
+        assert audit_row is not None
+        assert audit_row.parameters_summary == {"account_id": "8123"}
         cycle = await session.scalar(select(QuotaCycle))
         assert cycle.source_account_id == 8123
+
+
+@pytest.mark.asyncio
+async def test_account_listing_allows_banned_current_account(app_context):
+    factory, gateway, settings = app_context
+    gateway.me_response = gateway.me_response.model_copy(
+        update={"current_account": gateway.me_response.current_account.model_copy(update={"status": "banned"})}
+    )
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    listing = await recovery.list_accounts()
+
+    assert listing.me.current_account.status == "banned"
+    assert listing.accounts.items[0].account_id == 4949
+    assert gateway.accounts_calls == 1
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_select_account_rejects_banned_current_account_without_configuration_or_persistence(app_context):
+    factory, gateway, settings = app_context
+    gateway.me_response = gateway.me_response.model_copy(
+        update={"current_account": gateway.me_response.current_account.model_copy(update={"status": "banned"})}
+    )
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError, match="当前账号状态异常：banned"):
+        await recovery.select_account(4949, 1)
+
+    assert gateway.accounts_calls == 0
+    assert gateway.members_calls == 0
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert state is not None
+        assert state.selected_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_persists_and_restores_after_restart(app_context):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    selected = await recovery.select_account("4949", 1)
+
+    assert selected.account_id == 4949
+    assert gateway.account_id == 4949
+    assert await gate.is_enabled() is False
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert state.selected_account_id == "4949"
+        assert state.write_enabled is False
+        assert state.quota_task_enabled is False
+        audit_row = await session.scalar(select(AuditLog).where(AuditLog.action == "SELECT_ACCOUNT"))
+        assert audit_row is not None
+        assert audit_row.parameters_summary == {"account_id": "4949"}
+
+    await gate.ensure_disabled()
+    gateway.account_id = None
+    restored = await recovery.restore_persisted_account()
+
+    assert restored == "4949"
+    assert gateway.account_id == "4949"
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lifecycle", "health", "message"),
+    [
+        ("unbound", "healthy", "未绑定"),
+        ("bound", "banned", "健康状态不可用"),
+    ],
+)
+async def test_select_account_rejects_unusable_live_account(app_context, lifecycle, health, message):
+    factory, gateway, settings = app_context
+    gateway.account_rows = [{"id": 7022, "account_id": 4949, "health": health, "lifecycle": lifecycle, "org_id": 178}]
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError, match=message):
+        await recovery.select_account(4949, 1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_select_account_upstream_failure_leaves_gate_disabled(app_context):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+
+    async def fail_members():
+        raise ConnectionError("members unavailable")
+
+    gateway.members = fail_members
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(ConnectionError, match="members unavailable"):
+        await recovery.select_account(4949, 1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_select_account_final_audit_failure_rolls_back_activation(app_context, monkeypatch):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    async def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr("reclaude_bot.application.recovery.audit", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await recovery.select_account(4949, 1)
+
+    assert gateway.members_calls == 1
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert state is not None
+        assert state.selected_account_id is None
+        assert state.write_enabled is False
+        assert (await session.scalars(select(AuditLog))).all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_id", ["not-an-id", "9999"])
+async def test_select_account_rejects_invalid_or_missing_account(app_context, requested_id):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
+
+    with pytest.raises(EligibilityError):
+        await recovery.select_account(requested_id, 1)
+
+    assert gateway.account_id is None
+    assert await gate.is_enabled() is False
 
 
 @pytest.mark.asyncio
@@ -193,7 +351,7 @@ async def test_recovery_post_auth_failure_disables_previously_enabled_gate(app_c
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
-    await gate.enable_after_reconcile(1)
+    await gate.activate_task(1)
     assert await gate.is_enabled() is True
 
     async def fail_accounts():

@@ -9,12 +9,23 @@ members snapshot and cycle-baseline reconcile before enabling quota writes.
 
 ## Health gates
 
-The service fails closed when the current account status is not `bound`, the `/accounts` response
-does not contain exactly one bound record whose health is non-empty and not `banned`, its
-`account_id` is missing or invalid, or a session request returns `401`. Account IDs are discovered
-afresh by `/account`; the
-record's separate database `id` is never used. No retry is attempted after the first `401` until
-the recovery runbook is completed.
+The service fails closed when a selected account is not live, its lifecycle is not `bound`, its
+health is empty or `banned`, its `account_id` is missing or invalid, or a session request returns
+`401`. `/account` is a read-only live inventory (including a banned current account); `/use <account_id>`
+validates one selected record, reconciles it, and persists the selection without enabling writes.
+Use `/starttask` as the single operator write switch, and `/stoptask` to close writes and the quota
+loop together. The legacy `/recovery_enable` command retains the stricter single-bound-account
+discovery flow but does not independently start the task. The account record's separate database
+`id` is never used. No retry is attempted after the first `401` until the recovery runbook is
+completed.
+
+The quota task starts stopped on a new database. Its `RUNNING`/`STOPPED` state survives a restart;
+a persisted `RUNNING` state resumes only after startup validates the selected account. The internal
+`RecoveryGate` remains a fail-safe for startup validation, invalid accounts, and 401 recovery.
+`/task` reports the state and best-effort tick health. Member scope defaults to `ALL`; use
+`/addtaskmember <reclaude_user_id> ...` to create an `ALLOWLIST`, `/deletetaskmember ...` to remove
+IDs, and `/addtaskmember all` to clear the allowlist and return to `ALL`. Group onboarding remains
+independent of the quota task.
 
 Quota writes also require a fresh `/members` snapshot. The default maximum age is 90 seconds;
 future-dated or older snapshots are ignored until the next normal members sync. Override this

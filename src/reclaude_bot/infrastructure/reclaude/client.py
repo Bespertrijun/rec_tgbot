@@ -22,6 +22,8 @@ from .models import AccountsResponse, MembersResponse, MeResponse
 
 log = structlog.get_logger(__name__)
 
+_RECOGNIZED_SESSION_COOKIE_NAMES = frozenset({"rc_sid", "session", "sessionid", "sid", "auth_token"})
+
 
 class ReclaudeGateway(Protocol):
     account_id: int | str | None
@@ -35,12 +37,17 @@ class ReclaudeGateway(Protocol):
     async def revoke(self, user_id: str | int) -> httpx.Response | None: ...
 
 
-def _has_session_cookie(cookies: dict[str, str]) -> bool:
-    recognized = {"rc_sid", "session", "sessionid", "sid", "auth_token"}
-    return any(
-        value.strip() and (name.casefold() in recognized or "session" in name.casefold() or name.casefold().endswith("sid"))
-        for name, value in cookies.items()
+def _is_session_cookie(name: str, value: str | None) -> bool:
+    normalized_name = name.casefold()
+    return bool(value and value.strip()) and (
+        normalized_name in _RECOGNIZED_SESSION_COOKIE_NAMES
+        or "session" in normalized_name
+        or normalized_name.endswith("sid")
     )
+
+
+def _has_session_cookie(cookies: dict[str, str]) -> bool:
+    return any(_is_session_cookie(name, value) for name, value in cookies.items())
 
 
 def _parse_cookie_header(session_cookie: str | None) -> dict[str, str]:
@@ -75,6 +82,12 @@ class ReclaudeClient:
         login_password: SecretStr | str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        parsed_base_url = httpx.URL(self.base_url)
+        if not parsed_base_url.host:
+            raise ValueError("Reclaude base URL must include a hostname")
+        if parsed_base_url.scheme not in {"http", "https"}:
+            raise ValueError("Reclaude base URL must use http or https")
+        self._cookie_domain = parsed_base_url.host
         self.cookie_jar_path = Path(cookie_jar_path) if cookie_jar_path else None
         self.user_agent = user_agent
         self.timeout = timeout
@@ -127,7 +140,7 @@ class ReclaudeClient:
                 raise ValueError("no valid Reclaude session cookie is configured")
             return
         for name, value in cookies.items():
-            self._client.cookies.set(name, value)
+            self._client.cookies.set(name, value, domain=self._cookie_domain, path="/")
         self._session_available = True
         if self.cookie_jar_path:
             self._persist_cookies()
@@ -139,7 +152,32 @@ class ReclaudeClient:
     def _has_current_session_cookie(self) -> bool:
         if self._client is None:
             return False
-        return _has_session_cookie({str(name): str(value) for name, value in self._client.cookies.items()})
+        return any(_is_session_cookie(cookie.name, cookie.value) for cookie in self._client.cookies.jar)
+
+    def _canonicalize_response_cookies(self, response: httpx.Response) -> None:
+        """Keep the newest recognized session cookie as the only same-name variant."""
+        if self._client is None:
+            return
+        authoritative: dict[str, tuple[str, str, str]] = {}
+        for cookie in response.cookies.jar:
+            if _is_session_cookie(cookie.name, cookie.value):
+                authoritative[cookie.name.casefold()] = (cookie.name, cookie.domain, cookie.path)
+        if not authoritative:
+            return
+        for cookie in list(self._client.cookies.jar):
+            selected = authoritative.get(cookie.name.casefold())
+            if selected is None or (cookie.name, cookie.domain, cookie.path) == selected:
+                continue
+            self._client.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
+
+    def _cookie_values(self) -> dict[str, str]:
+        if self._client is None:
+            return {}
+        return {
+            str(cookie.name): str(cookie.value)
+            for cookie in self._client.cookies.jar
+            if isinstance(cookie.value, str) and cookie.value.strip()
+        }
 
     def _persist_cookies(self, *, required: bool = False) -> None:
         if not self.cookie_jar_path:
@@ -151,7 +189,7 @@ class ReclaudeClient:
             try:
                 os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(dict(self._client.cookies), handle, sort_keys=True)
+                    json.dump(self._cookie_values(), handle, sort_keys=True)
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temp_path, self.cookie_jar_path)
@@ -189,6 +227,7 @@ class ReclaudeClient:
                         raise UpstreamError(f"Reclaude request failed: {exc}") from exc
                     await asyncio.sleep(0.2 * (2**attempt))
                     continue
+                self._canonicalize_response_cookies(response)
                 if response.status_code == 401:
                     self._circuit_open = True
                     self._persist_cookies()
@@ -249,6 +288,7 @@ class ReclaudeClient:
             except httpx.HTTPError as exc:
                 self._circuit_open = True
                 raise UpstreamError("Reclaude login request failed; retry recovery later") from exc
+            self._canonicalize_response_cookies(response)
 
             status = response.status_code
             payload: Any = None

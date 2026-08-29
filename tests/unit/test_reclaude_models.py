@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from reclaude_bot.bot.handlers import build_admin_router
 from reclaude_bot.config import Settings
@@ -98,3 +99,22 @@ async def test_use_account_escapes_domain_error_for_html_mode() -> None:
     await handler(message, command, recovery)
 
     message.answer.assert_awaited_once_with("账号选择失败：invalid &lt;account&gt; &amp; status")
+
+
+@pytest.mark.asyncio
+async def test_account_unexpected_error_logs_safe_structured_event() -> None:
+    router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
+    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "recovery_enable")
+    secret_marker = "session-cookie-secret-marker"
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    command = type("Command", (), {"command": "account", "args": None})()
+    recovery = SimpleNamespace(list_accounts=AsyncMock(side_effect=RuntimeError(secret_marker)))
+
+    with capture_logs() as logs:
+        await handler(message, command, recovery)
+
+    event = next(item for item in logs if item.get("event") == "reclaude_account_listing_failed")
+    assert event.get("error_type") == "RuntimeError"
+    assert event.get("traceback")
+    assert secret_marker not in repr(logs)
+    message.answer.assert_awaited_once_with("账号查询失败，请检查 Reclaude 登录和会话状态。")

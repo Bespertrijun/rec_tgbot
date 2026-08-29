@@ -14,6 +14,27 @@ from reclaude_bot.infrastructure.reclaude.fake import FakeReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import CurrentAccount, Member, MeResponse, SevenDay, UsageSnapshot, WeeklyLimit
 
 
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    """Keep integration paths that use implicit timestamps inside the fixture cycle."""
+    current = [datetime(2026, 8, 18, tzinfo=UTC)]
+
+    def fixed_now() -> datetime:
+        return current[0]
+
+    for target in (
+        "reclaude_bot.application.audit.utcnow",
+        "reclaude_bot.application.actions.utcnow",
+        "reclaude_bot.application.admin.utcnow",
+        "reclaude_bot.application.binding.utcnow",
+        "reclaude_bot.application.quota.utcnow",
+        "reclaude_bot.application.recovery.utcnow",
+        "reclaude_bot.application.task.utcnow",
+    ):
+        monkeypatch.setattr(target, fixed_now)
+    return current
+
+
 @pytest_asyncio.fixture
 async def app_context():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

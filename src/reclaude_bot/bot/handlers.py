@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import html
+import traceback
 from decimal import Decimal, InvalidOperation
 
+import structlog
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -20,6 +22,8 @@ from reclaude_bot.domain.errors import DomainError
 from reclaude_bot.infrastructure.db.models import UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord
 from reclaude_bot.jobs.scheduler import BackgroundJobs
+
+log = structlog.get_logger(__name__)
 
 
 def build_router(settings: Settings) -> Router:
@@ -286,7 +290,12 @@ def build_admin_router(settings: Settings) -> Router:
                 await message.answer("\n".join(lines))
             except DomainError as exc:
                 await message.answer(f"账号查询失败：{exc}")
-            except Exception:
+            except Exception as exc:
+                log.error(
+                    "reclaude_account_listing_failed",
+                    error_type=type(exc).__name__,
+                    traceback="".join(traceback.format_tb(exc.__traceback__)),
+                )
                 await message.answer("账号查询失败，请检查 Reclaude 登录和会话状态。")
             return
         try:

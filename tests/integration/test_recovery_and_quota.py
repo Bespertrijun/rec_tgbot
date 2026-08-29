@@ -53,7 +53,7 @@ async def test_status_is_cache_only_and_used_uses_dynamic_limit(app_context):
 
 
 @pytest.mark.asyncio
-async def test_recovery_health_checks_accounts_without_enabling_task(app_context):
+async def test_recovery_health_checks_accounts_without_enabling_task(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gateway.account_rows = [
         {
@@ -134,7 +134,7 @@ async def test_select_account_rejects_banned_current_account_without_configurati
 
 
 @pytest.mark.asyncio
-async def test_select_account_persists_and_restores_after_restart(app_context):
+async def test_select_account_persists_and_restores_after_restart(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
@@ -205,7 +205,7 @@ async def test_select_account_upstream_failure_leaves_gate_disabled(app_context)
 
 
 @pytest.mark.asyncio
-async def test_select_account_final_audit_failure_rolls_back_activation(app_context, monkeypatch):
+async def test_select_account_final_audit_failure_rolls_back_activation(app_context, monkeypatch, fixed_clock):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()

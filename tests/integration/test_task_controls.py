@@ -53,7 +53,7 @@ async def test_task_scope_defaults_all_and_is_idempotent(app_context):
 
 
 @pytest.mark.asyncio
-async def test_start_stop_persist_and_do_not_affect_group_worker(app_context):
+async def test_start_stop_persist_and_do_not_affect_group_worker(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
@@ -105,7 +105,7 @@ async def test_stopped_task_never_refreshes_cycle_or_members(app_context):
 
 
 @pytest.mark.asyncio
-async def test_running_task_is_force_stopped_when_start_validation_fails(app_context):
+async def test_running_task_is_force_stopped_when_start_validation_fails(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()

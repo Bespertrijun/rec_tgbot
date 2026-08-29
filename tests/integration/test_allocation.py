@@ -45,13 +45,14 @@ async def test_normal_tick_has_one_members_call_and_reconciles_quota_revoke(app_
 
 
 @pytest.mark.asyncio
-async def test_setquota_uses_local_cache_and_increased_limit_restores(app_context):
+async def test_setquota_uses_local_cache_and_increased_limit_restores(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, user, now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
     await poll_once(quota, actions, now=now + timedelta(minutes=1))
     await poll_once(quota, actions, now=now + timedelta(minutes=2))
-    await quota.sync_members(now=datetime.now(UTC))
+    await quota.sync_members(now=now + timedelta(minutes=2))
     members_calls = gateway.members_calls
+    fixed_clock[0] = now + timedelta(minutes=3)
     admin = AdminService(factory, quota, actions)
     value = await admin.set_quota(Decimal("900"), 1)
     assert value == Decimal("900")
@@ -65,11 +66,12 @@ async def test_setquota_uses_local_cache_and_increased_limit_restores(app_contex
 
 
 @pytest.mark.asyncio
-async def test_lowering_limit_revoke_uses_cached_member_without_read(app_context):
+async def test_lowering_limit_revoke_uses_cached_member_without_read(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, user, now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
-    await quota.sync_members(now=datetime.now(UTC))
+    await quota.sync_members(now=now + timedelta(minutes=1))
     members_calls = gateway.members_calls
+    fixed_clock[0] = now + timedelta(minutes=2)
     admin = AdminService(factory, quota, actions)
     await admin.set_quota(Decimal("700"), 1)
     assert gateway.members_calls == members_calls
@@ -80,12 +82,13 @@ async def test_lowering_limit_revoke_uses_cached_member_without_read(app_context
 
 
 @pytest.mark.asyncio
-async def test_setquota_ignores_stale_member_snapshot_without_reads_or_writes(app_context):
+async def test_setquota_ignores_stale_member_snapshot_without_reads_or_writes(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, user, now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
     await quota.sync_members(now=now + timedelta(minutes=1))
     members_calls = gateway.members_calls
     me_calls = gateway.me_calls
+    fixed_clock[0] = now + timedelta(minutes=3)
 
     value = await AdminService(factory, quota, actions).set_quota(Decimal("700"), 1)
 
@@ -99,10 +102,11 @@ async def test_setquota_ignores_stale_member_snapshot_without_reads_or_writes(ap
 
 
 @pytest.mark.asyncio
-async def test_next_members_tick_executes_after_stale_setquota_snapshot(app_context):
+async def test_next_members_tick_executes_after_stale_setquota_snapshot(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, _user, now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
     await quota.sync_members(now=now + timedelta(minutes=1))
+    fixed_clock[0] = now + timedelta(minutes=3)
     await AdminService(factory, quota, actions).set_quota(Decimal("700"), 1)
     members_calls = gateway.members_calls
     me_calls = gateway.me_calls
@@ -115,10 +119,10 @@ async def test_next_members_tick_executes_after_stale_setquota_snapshot(app_cont
 
 
 @pytest.mark.asyncio
-async def test_future_member_snapshot_does_not_execute_cached_action(app_context):
+async def test_future_member_snapshot_does_not_execute_cached_action(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, user, _now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
-    await quota.sync_members(now=datetime.now(UTC) + timedelta(seconds=30))
+    await quota.sync_members(now=_now + timedelta(seconds=30))
     members_calls = gateway.members_calls
     me_calls = gateway.me_calls
 
@@ -133,10 +137,10 @@ async def test_future_member_snapshot_does_not_execute_cached_action(app_context
 
 
 @pytest.mark.asyncio
-async def test_fresh_member_snapshot_executes_cached_action_immediately(app_context):
+async def test_fresh_member_snapshot_executes_cached_action_immediately(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, _user, _now = await seed(app_context)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
-    await quota.sync_members(now=datetime.now(UTC) - timedelta(seconds=1))
+    await quota.sync_members(now=_now - timedelta(seconds=1))
     members_calls = gateway.members_calls
     me_calls = gateway.me_calls
 

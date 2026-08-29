@@ -8,6 +8,10 @@
 2. `RECLAUDE_SESSION_COOKIE` remains an optional compatibility or initial fallback. Do not
    reuse a browser session, any Cookie copied from chat, or an `rck_` API key. A valid existing
    cookie jar is reused before attempting password login.
+   Existing flat `cookies.json` files require no manual conversion: the Bot scopes loaded
+   values to the configured Reclaude hostname and `/` path. When Reclaude refreshes a
+   recognized session cookie, the response value becomes authoritative and older domain/path
+   variants are removed before the jar is persisted.
 3. Keep the external cookie jar outside the repository with mode `0600` and readable only by
    the Bot user. Host mode `0600` does not prevent `root`, a rootful Docker daemon, or a
    privileged container process from reading the `.env` or jar.

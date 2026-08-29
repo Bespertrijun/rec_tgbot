@@ -67,6 +67,7 @@ def admin_member(user_id: int = 999) -> ChatMemberAdministrator:
         can_post_stories=True,
         can_edit_stories=True,
         can_delete_stories=True,
+        can_send_welcome_messages=True,
     )
 
 

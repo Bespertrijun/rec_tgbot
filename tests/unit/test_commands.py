@@ -37,6 +37,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
             {"command": "bind", "description": "绑定邮箱（需要参数）"},
             {"command": "status", "description": "查看额度状态"},
             {"command": "sync", "description": "同步上游成员"},
+            {"command": "member", "description": "查看上游成员列表"},
             {"command": "setquota", "description": "设置当前周期额度"},
             {"command": "ban", "description": "禁用用户"},
             {"command": "unban", "description": "解禁用户"},

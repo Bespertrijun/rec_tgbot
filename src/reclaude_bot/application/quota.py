@@ -205,6 +205,10 @@ class QuotaService:
                             user.updated_at = moment
             return len(members.items)
 
+    async def list_upstream_members(self) -> list[UpstreamMember]:
+        async with self.session_factory() as session:
+            return list((await session.scalars(select(UpstreamMember).order_by(UpstreamMember.email_normalized))).all())
+
     async def set_quota(self, amount: Decimal, operator_id: int) -> Decimal:
         amount = as_decimal(amount)
         if amount < 0:

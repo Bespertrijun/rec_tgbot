@@ -22,7 +22,8 @@ completed.
 The quota task starts stopped on a new database. Its `RUNNING`/`STOPPED` state survives a restart;
 a persisted `RUNNING` state resumes only after startup validates the selected account. The internal
 `RecoveryGate` remains a fail-safe for startup validation, invalid accounts, and 401 recovery.
-`/task` reports the state and best-effort tick health. Member scope defaults to `ALL`; use
+`/task` reports the state and best-effort tick health. `/member` lists all cached upstream member
+emails and Reclaude user IDs for use with `/addtaskmember`. Member scope defaults to `ALL`; use
 `/addtaskmember <reclaude_user_id> ...` to create an `ALLOWLIST`, `/deletetaskmember ...` to remove
 IDs, and `/addtaskmember all` to clear the allowlist and return to `ALL`. Group onboarding remains
 independent of the quota task.

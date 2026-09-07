@@ -17,6 +17,7 @@ _USER_COMMANDS: tuple[tuple[str, str], ...] = (
 
 _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("sync", "同步上游成员"),
+    ("member", "查看上游成员列表"),
     ("setquota", "设置当前周期额度"),
     ("ban", "禁用用户"),
     ("unban", "解禁用户"),

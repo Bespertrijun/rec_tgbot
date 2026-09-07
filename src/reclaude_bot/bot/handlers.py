@@ -121,6 +121,35 @@ def build_admin_router(settings: Settings) -> Router:
         except Exception:
             await message.answer("同步失败，已记录告警。")
 
+    @router.message(Command("member"))
+    async def member_list(message: Message, quota: QuotaService) -> None:
+        if not is_admin(message):
+            return
+        try:
+            members = await quota.list_upstream_members()
+            if not members:
+                await message.answer("暂无上游成员，请先执行 /sync")
+                return
+            lines = [f"上游成员：{len(members)} 个 | 最近同步：{_format_datetime(max(member.sampled_at for member in members))}"]
+            lines.extend(f"- {html.escape(member.email)} | {html.escape(member.reclaude_user_id)}" for member in members)
+            current = ""
+            for line in lines:
+                candidate = f"{current}\n{line}" if current else line
+                if current and len(candidate) > 4000:
+                    await message.answer(current)
+                    current = line
+                else:
+                    current = candidate
+            if current:
+                await message.answer(current)
+        except Exception as exc:
+            log.error(
+                "upstream_member_listing_failed",
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
+            await message.answer("成员列表暂时不可用。")
+
     @router.message(Command("setquota"))
     async def setquota(message: Message, command: CommandObject, admin: AdminService) -> None:
         if not is_admin(message):

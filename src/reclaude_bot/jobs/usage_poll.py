@@ -7,8 +7,7 @@ from reclaude_bot.application.quota import QuotaService
 
 
 async def poll_once(quota: QuotaService, actions: QuotaActionService, *, now: datetime | None = None) -> int:
-    gate = getattr(actions, "gate", None)
-    if gate is not None and not await gate.is_task_enabled():
+    if not await actions.any_task_enabled():
         return 0
     moment = now or datetime.now(UTC)
     await quota.ensure_cycle(now=moment)

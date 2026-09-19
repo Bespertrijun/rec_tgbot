@@ -10,6 +10,7 @@ from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
+from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.domain.enums import BaselineStatus, QuotaRevocationStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
@@ -83,7 +84,6 @@ async def test_recovery_health_checks_accounts_without_enabling_task(app_context
     async with factory() as session:
         state = await session.get(ServiceState, 1)
         assert state.write_enabled is False
-        assert state.quota_task_enabled is False
         assert state.selected_account_id == "8123"
         audit_row = await session.scalar(select(AuditLog).where(AuditLog.action == "SELECT_ACCOUNT"))
         assert audit_row is not None
@@ -149,7 +149,6 @@ async def test_select_account_persists_and_restores_after_restart(app_context, f
         state = await session.get(ServiceState, 1)
         assert state.selected_account_id == "4949"
         assert state.write_enabled is False
-        assert state.quota_task_enabled is False
         audit_row = await session.scalar(select(AuditLog).where(AuditLog.action == "SELECT_ACCOUNT"))
         assert audit_row is not None
         assert audit_row.parameters_summary == {"account_id": "4949"}
@@ -351,7 +350,10 @@ async def test_recovery_post_auth_failure_disables_previously_enabled_gate(app_c
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
-    await gate.activate_task(1)
+    await gate.persist_selected_account(4949, 1)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    await task.start("default", 1)
     assert await gate.is_enabled() is True
 
     async def fail_accounts():
@@ -366,6 +368,7 @@ async def test_recovery_post_auth_failure_disables_previously_enabled_gate(app_c
     assert gateway.me_calls == 1
     assert gateway.accounts_calls == 1
     assert await gate.is_enabled() is False
+    assert await task.any_enabled() is False
     async with factory() as session:
         state = await session.get(ServiceState, 1)
         assert state.reason == "reclaude_recovery_failed"
@@ -376,13 +379,22 @@ async def test_write_disabled_gate_prevents_automatic_revoke(app_context):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(4949, 1)
     quota = QuotaService(factory, gateway, settings)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    await task.start("default", 1)
+    # Close the internal latch while the task stays RUNNING.
+    await gate.disable("maintenance")
     actions = QuotaActionService(factory, gateway, quota, settings, gate=gate)
     await quota.sync_cycle_from_me(now=datetime(2026, 8, 18, tzinfo=UTC))
     await quota.sync_members(now=datetime(2026, 8, 18, tzinfo=UTC))
     await BindingService(factory, gateway).bind(302, "one@example.com")
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
+    members_before = gateway.members_calls
     await poll_once(quota, actions, now=datetime(2026, 8, 18, 0, 1, tzinfo=UTC))
+    # The sync still runs; only the write path is blocked.
+    assert gateway.members_calls == members_before + 1
     assert gateway.revoke_calls == []
 
 

@@ -292,3 +292,84 @@ class QuotaService:
                 "cycle_status": cycle.status,
                 "sampled_at": member.sampled_at,
             }
+
+    async def list_task_usage(self, *, scope_mode: str, member_ids: tuple[str, ...], limit_usd: Decimal, now: datetime | None = None) -> dict[str, Any]:
+        """Cache-only usage rows for one task's member scope; never calls the upstream API."""
+        moment = ensure_utc(now or utcnow())
+        limit = as_decimal(limit_usd)
+        async with self.session_factory() as session:
+            cycle = await self.current_cycle(session, moment)
+            if cycle is None:
+                raise EligibilityError("当前周期不可用")
+            missing: list[str] = []
+            if scope_mode == "ALLOWLIST":
+                configured = list(dict.fromkeys(member_ids))
+                if configured:
+                    members = {
+                        member.reclaude_user_id: member
+                        for member in (await session.scalars(select(UpstreamMember).where(UpstreamMember.reclaude_user_id.in_(configured)))).all()
+                    }
+                else:
+                    members = {}
+                missing = [value for value in configured if value not in members]
+            else:
+                members = {member.reclaude_user_id: member for member in (await session.scalars(select(UpstreamMember))).all()}
+                if scope_mode == "EXCLUDE":
+                    excluded = set(member_ids)
+                    members = {key: value for key, value in members.items() if key not in excluded}
+            baselines = (
+                {
+                    baseline.reclaude_user_id: baseline
+                    for baseline in (
+                        await session.scalars(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id, CycleBaseline.reclaude_user_id.in_(list(members))))
+                    ).all()
+                }
+                if members
+                else {}
+            )
+            users = (
+                {user.reclaude_user_id: user for user in (await session.scalars(select(User).where(User.reclaude_user_id.in_(list(members))))).all()}
+                if members
+                else {}
+            )
+            adjustments: dict[int, list[Decimal]] = {}
+            for adjustment in (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.cycle_id == cycle.id))).all():
+                adjustments.setdefault(adjustment.user_id, []).append(adjustment.amount_usd)
+        entries: list[dict[str, Any]] = []
+        for reclaude_user_id, member in members.items():
+            user = users.get(reclaude_user_id)
+            baseline = baselines.get(reclaude_user_id)
+            used: Decimal | None = None
+            remaining: Decimal | None = None
+            if baseline is not None:
+                used = cycle_used(
+                    member.total_usage_usd,
+                    baseline.baseline_total_usd,
+                    [amount for amount in adjustments.get(user.id, [])] if user is not None else [],
+                )
+                remaining = max(Decimal("0"), limit - used)
+            entries.append(
+                {
+                    "reclaude_user_id": reclaude_user_id,
+                    "email": member.email,
+                    "telegram_user_id": user.telegram_user_id if user is not None else None,
+                    "user_status": user.status if user is not None else None,
+                    "used_usd": used,
+                    "remaining_usd": remaining,
+                    "missing_upstream": False,
+                }
+            )
+        for value in missing:
+            entries.append(
+                {
+                    "reclaude_user_id": value,
+                    "email": None,
+                    "telegram_user_id": None,
+                    "user_status": None,
+                    "used_usd": None,
+                    "remaining_usd": None,
+                    "missing_upstream": True,
+                }
+            )
+        entries.sort(key=lambda entry: (entry["missing_upstream"], entry["used_usd"] is None, -(entry["used_usd"] or Decimal("0"))))
+        return {"limit_usd": limit, "reset_at": cycle.reset_at, "members": entries}

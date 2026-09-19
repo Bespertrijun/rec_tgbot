@@ -3,18 +3,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.config import Settings
-from reclaude_bot.domain.enums import CycleStatus, QuotaRevocationStatus, UserStatus
-from reclaude_bot.domain.quota import cycle_used, ensure_utc, is_last_24h
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaRevocation, QuotaTaskMember, ServiceState, UpstreamMember, User
+from reclaude_bot.domain.enums import CycleStatus, QuotaRevocationStatus, TaskStatus, UserStatus
+from reclaude_bot.domain.quota import as_decimal, cycle_used, ensure_utc, is_last_24h
+from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaRevocation, QuotaTask, QuotaTaskMember, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 
 log = structlog.get_logger(__name__)
@@ -39,9 +40,13 @@ class QuotaActionService:
         self._lock = asyncio.Lock()
 
     async def _writes_allowed(self) -> bool:
-        if self.gate is None:
-            return True
-        return await self.gate.is_task_enabled() and await self.gate.is_enabled()
+        if self.gate is not None and not await self.gate.is_enabled():
+            return False
+        return await self.any_task_enabled()
+
+    async def any_task_enabled(self) -> bool:
+        async with self.session_factory() as session:
+            return bool(await session.scalar(select(func.count(QuotaTask.id)).where(QuotaTask.status == TaskStatus.RUNNING.value)))
 
     async def _notify(self, message: str) -> None:
         if self.alert_callback:
@@ -56,7 +61,7 @@ class QuotaActionService:
         age = moment - sampled
         return timedelta(0) <= age <= timedelta(seconds=self.settings.member_snapshot_max_age_seconds)
 
-    async def _prepare_action(self, user_id: int, *, now: datetime) -> tuple[str, str, int] | None:
+    async def _prepare_action(self, user_id: int, *, effective_limit: Decimal, now: datetime) -> tuple[str, str, int, str] | None:
         async with self.session_factory() as session:
             async with session.begin():
                 cycle = await self.quota.current_cycle(session, now)
@@ -77,7 +82,7 @@ class QuotaActionService:
                     return None
                 adjustments = (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.user_id == user.id, QuotaAdjustment.cycle_id == cycle.id))).all()
                 used = cycle_used(member.total_usage_usd, baseline.baseline_total_usd, [item.amount_usd for item in adjustments])
-                limit = await self.quota._runtime_limit(session)
+                limit = effective_limit
                 assigned = member.account_id is not None
                 revocation = await session.scalar(
                     select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == cycle.id).with_for_update()
@@ -112,7 +117,7 @@ class QuotaActionService:
                     revocation.state = QuotaRevocationStatus.PENDING_RESTORE.value
                     revocation.updated_at = now
                     revocation.last_error = None
-                    return "restore", user.reclaude_user_id, cycle.id
+                    return "restore", user.reclaude_user_id, cycle.id, str(limit)
 
                 if assigned and used >= limit:
                     if revocation is None:
@@ -133,7 +138,7 @@ class QuotaActionService:
                         revocation.pending_at = now
                         revocation.updated_at = now
                         revocation.last_error = None
-                    return "revoke", user.reclaude_user_id, cycle.id
+                    return "revoke", user.reclaude_user_id, cycle.id, str(limit)
 
                 if not assigned and revocation is not None and revocation.state in (QuotaRevocationStatus.REVOKED.value, QuotaRevocationStatus.PENDING_RESTORE.value) and used < limit:
                     if revocation.state == QuotaRevocationStatus.PENDING_RESTORE.value and ensure_utc(member.sampled_at) <= ensure_utc(revocation.updated_at):
@@ -141,11 +146,11 @@ class QuotaActionService:
                     revocation.state = QuotaRevocationStatus.PENDING_RESTORE.value
                     revocation.updated_at = now
                     revocation.last_error = None
-                    return "restore", user.reclaude_user_id, cycle.id
+                    return "restore", user.reclaude_user_id, cycle.id, str(limit)
                 return None
 
-    async def _execute(self, action: tuple[str, str, int], *, now: datetime) -> None:
-        kind, reclaude_user_id, cycle_id = action
+    async def _execute(self, action: tuple[str, str, int, str], *, now: datetime) -> None:
+        kind, reclaude_user_id, cycle_id, limit_usd = action
         if not await self._writes_allowed():
             return
         try:
@@ -165,7 +170,7 @@ class QuotaActionService:
                         action=event,
                         target_type="USER",
                         target_id=str(user.id) if user else reclaude_user_id,
-                        parameters_summary={"cycle_id": cycle_id, "state": "PENDING_CONFIRMATION"},
+                        parameters_summary={"cycle_id": cycle_id, "state": "PENDING_CONFIRMATION", "limit_usd": limit_usd},
                     )
         except Exception as exc:
             async with self.session_factory() as session:
@@ -186,40 +191,63 @@ class QuotaActionService:
                             target_type="USER",
                             target_id=str(user.id),
                             result="PENDING_CONFIRMATION",
-                            parameters_summary={"cycle_id": cycle_id, "error": str(exc)},
+                            parameters_summary={"cycle_id": cycle_id, "error": str(exc), "limit_usd": limit_usd},
                         )
             await self._notify(f"{kind} {reclaude_user_id} 结果待下一次成员同步确认")
+
+    async def _running_coverage(self, session: AsyncSession) -> dict[str, Decimal]:
+        """reclaude_user_id → strictest (smallest) limit across RUNNING tasks covering it."""
+
+        tasks = list((await session.scalars(select(QuotaTask).where(QuotaTask.status == TaskStatus.RUNNING.value))).all())
+        if not tasks:
+            return {}
+        coverage: dict[str, Decimal] = {}
+        all_member_ids: set[str] | None = None
+        for task in tasks:
+            if task.scope_mode == "ALLOWLIST":
+                ids: list[str] = list((await session.scalars(select(QuotaTaskMember.reclaude_user_id).where(QuotaTaskMember.task_id == task.id))).all())
+            else:
+                if all_member_ids is None:
+                    all_member_ids = set((await session.scalars(select(UpstreamMember.reclaude_user_id))).all())
+                if task.scope_mode == "EXCLUDE":
+                    excluded = set((await session.scalars(select(QuotaTaskMember.reclaude_user_id).where(QuotaTaskMember.task_id == task.id))).all())
+                    ids = list(all_member_ids - excluded)
+                else:
+                    ids = list(all_member_ids)
+            limit = as_decimal(task.limit_usd)
+            for reclaude_user_id in ids:
+                current = coverage.get(reclaude_user_id)
+                if current is None or limit < current:
+                    coverage[reclaude_user_id] = limit
+        return coverage
 
     async def reconcile_cached(self, *, now: datetime | None = None) -> int:
         moment = ensure_utc(now or utcnow())
         async with self._lock:
-            if self.gate is not None and not await self.gate.is_task_enabled():
+            if self.gate is not None and not await self.gate.is_enabled():
                 return 0
             async with self.session_factory() as session:
                 cycle = await self.quota.current_cycle(session, moment)
                 if cycle is None:
                     return 0
-                state = await session.get(ServiceState, 1)
-                if state is not None and state.quota_task_scope_mode == "ALLOWLIST":
-                    scoped_ids = list((await session.scalars(select(QuotaTaskMember.reclaude_user_id))).all())
-                    if not scoped_ids:
-                        return 0
-                    user_ids = list(
-                        (
-                            await session.scalars(
-                                select(User.id).where(
-                                    User.binding_status == "BOUND",
-                                    User.status == UserStatus.ACTIVE.value,
-                                    User.reclaude_user_id.in_(scoped_ids),
-                                )
+                coverage = await self._running_coverage(session)
+                if not coverage:
+                    return 0
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(User).where(
+                                User.binding_status == "BOUND",
+                                User.status == UserStatus.ACTIVE.value,
+                                User.reclaude_user_id.in_(list(coverage)),
                             )
-                        ).all()
-                    )
-                else:
-                    user_ids = list((await session.scalars(select(User.id).where(User.binding_status == "BOUND", User.status == UserStatus.ACTIVE.value))).all())
+                        )
+                    ).all()
+                )
+                targets = [(user.id, coverage[user.reclaude_user_id]) for user in rows]
             actions = 0
-            for user_id in user_ids:
-                action = await self._prepare_action(user_id, now=moment)
+            for user_id, limit in targets:
+                action = await self._prepare_action(user_id, effective_limit=limit, now=moment)
                 if action is None:
                     continue
                 actions += 1

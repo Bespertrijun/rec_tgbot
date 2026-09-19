@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.config import Settings
+from reclaude_bot.domain.enums import TaskStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.infrastructure.db.models import ServiceState
+from reclaude_bot.infrastructure.db.models import QuotaTask, ServiceState
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse, MembersResponse, MeResponse
 
@@ -42,28 +44,18 @@ class RecoveryGate:
                 state.updated_at = utcnow()
 
     async def force_stop(self, reason: str) -> None:
-        """Force both the durable task and internal latch stopped after a safety failure."""
+        """Stop every running task and close the internal latch after a safety failure."""
 
         async with self.session_factory() as session:
             async with session.begin():
                 state = await self._ensure_state(session, with_for_update=True)
                 now = utcnow()
-                state.quota_task_enabled = False
+                await session.execute(
+                    update(QuotaTask).where(QuotaTask.status == TaskStatus.RUNNING.value).values(status=TaskStatus.STOPPED.value, updated_at=now)
+                )
                 state.write_enabled = False
                 state.reason = reason
                 state.updated_at = now
-                state.quota_task_updated_at = now
-
-    async def enable_latch(self, reason: str = "quota_task_resumed") -> bool:
-        async with self.session_factory() as session:
-            async with session.begin():
-                state = await self._ensure_state(session, with_for_update=True)
-                if not state.quota_task_enabled:
-                    return False
-                state.write_enabled = True
-                state.reason = reason
-                state.updated_at = utcnow()
-                return True
 
     async def is_enabled(self, session: AsyncSession | None = None) -> bool:
         if session is not None:
@@ -72,14 +64,6 @@ class RecoveryGate:
         async with self.session_factory() as owned:
             state = await owned.get(ServiceState, 1)
             return bool(state and state.write_enabled)
-
-    async def is_task_enabled(self, session: AsyncSession | None = None) -> bool:
-        if session is not None:
-            state = await session.get(ServiceState, 1)
-            return bool(state and state.quota_task_enabled)
-        async with self.session_factory() as owned:
-            state = await owned.get(ServiceState, 1)
-            return bool(state and state.quota_task_enabled)
 
     async def get_state(self) -> ServiceState | None:
         async with self.session_factory() as session:
@@ -104,38 +88,6 @@ class RecoveryGate:
                     parameters_summary={"account_id": str(account_id)},
                 )
 
-    async def activate_task(self, operator_id: int | None = None) -> None:
-        """Compatibility helper for callers that already completed validation."""
-
-        async with self.session_factory() as session:
-            async with session.begin():
-                state = await self._ensure_state(session, with_for_update=True)
-                now = utcnow()
-                state.quota_task_enabled = True
-                state.write_enabled = True
-                state.reason = "quota_task_started"
-                state.updated_at = now
-                state.quota_task_updated_at = now
-                state.quota_task_updated_by = operator_id
-                await audit(
-                    session,
-                    actor_telegram_id=operator_id,
-                    actor_type="ADMIN" if operator_id is not None else "SYSTEM",
-                    action="QUOTA_TASK_STARTED",
-                    target_type="SERVICE",
-                    target_id="1",
-                )
-
-    async def activate_selected_account(self, account_id: int | str, operator_id: int) -> None:
-        """Deprecated compatibility API; new flows select then explicitly start the task."""
-
-        await self.persist_selected_account(account_id, operator_id)
-
-    async def enable_after_reconcile(self, operator_id: int) -> None:
-        """Deprecated compatibility alias for old integrations."""
-
-        await self.activate_task(operator_id)
-
     async def disable_from_401(self) -> None:
         await self.force_stop("reclaude_401_recovery_required")
 
@@ -147,11 +99,8 @@ class RecoveryGate:
             state = ServiceState(
                 id=1,
                 write_enabled=False,
-                quota_task_enabled=False,
-                quota_task_scope_mode="ALL",
                 reason="startup_recovery_required",
                 updated_at=now,
-                quota_task_updated_at=now,
             )
             session.add(state)
             await session.flush()

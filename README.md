@@ -21,5 +21,6 @@ that has been pasted into chat, a ticket, source control, or CI output.
 
 The normal loop calls `/members` once per minute and keeps the latest member assignment
 and cumulative usage locally. Users only need `/bind email` and `/status`; administrators
-can change the live limit with `/setquota amount`. Account assignment itself remains an
+group members into named quota tasks with per-task limits (`/newtask`, `/settaskquota`) and
+inspect one task's usage with `/taskusers`. Account assignment itself remains an
 operator action in the Reclaude console.

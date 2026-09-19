@@ -18,7 +18,7 @@ _USER_COMMANDS: tuple[tuple[str, str], ...] = (
 _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("sync", "同步上游成员"),
     ("member", "查看上游成员列表"),
-    ("setquota", "设置当前周期额度"),
+    ("setquota", "设置全局默认额度"),
     ("ban", "禁用用户"),
     ("unban", "解禁用户"),
     ("unbind", "解绑用户"),
@@ -26,11 +26,15 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("groups", "查看托管群组"),
     ("account", "查看 Reclaude 实时账号"),
     ("use", "选择并同步 Reclaude 账号"),
+    ("newtask", "新建限额任务"),
+    ("deltatask", "删除限额任务"),
     ("task", "查看限额任务状态"),
     ("starttask", "启动限额任务"),
     ("stoptask", "停止限额任务"),
     ("addtaskmember", "加入限额任务成员"),
     ("deletetaskmember", "移除限额任务成员"),
+    ("settaskquota", "设置任务每用户额度"),
+    ("taskusers", "查看任务成员使用状况"),
     ("recovery_enable", "兼容旧版恢复命令"),
 )
 

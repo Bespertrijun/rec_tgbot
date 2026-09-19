@@ -15,7 +15,7 @@ from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryService
-from reclaude_bot.application.task import ALLOWLIST, QuotaTaskService
+from reclaude_bot.application.task import ALLOWLIST, EXCLUDE, QuotaTaskService
 from reclaude_bot.bot.middleware import GroupAccessMiddleware
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError
@@ -159,7 +159,7 @@ def build_admin_router(settings: Settings) -> Router:
                 raise ValueError
             amount = Decimal(command.args.strip())
             value = await admin.set_quota(amount, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"当前周期额度已设置为 ${value:.2f}")
+            await message.answer(f"全局默认额度已设置为 ${value:.2f}（新建任务的默认值；现有任务请用 /settaskquota）")
         except (DomainError, InvalidOperation, ValueError) as exc:
             await message.answer(str(exc) or "用法：/setquota 金额")
 
@@ -210,14 +210,68 @@ def build_admin_router(settings: Settings) -> Router:
         except Exception:
             await message.answer("账号选择失败，写操作仍已暂停，请检查 Reclaude 登录、账号状态和成员同步。")
 
-    @router.message(Command("task"))
-    async def task_status(message: Message, task: QuotaTaskService, jobs: BackgroundJobs, quota: QuotaService) -> None:
+    @router.message(Command("newtask"))
+    async def new_task(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
+        if not is_admin(message):
+            return
+        values = (command.args or "").split()
+        if not values or len(values) > 2:
+            await message.answer("用法：/newtask 名称 [每用户额度]")
+            return
+        try:
+            limit = Decimal(values[1]) if len(values) == 2 else None
+        except InvalidOperation:
+            await message.answer("用法：/newtask 名称 [每用户额度]")
+            return
+        try:
+            snapshot = await task.create_task(values[0], limit, message.from_user.id)  # type: ignore[union-attr]
+        except DomainError as exc:
+            await message.answer(str(exc))
+            return
+        await message.answer(
+            f"限额任务 {html.escape(snapshot.name)} 已创建：STOPPED | 范围 ALL | 每用户额度 ${snapshot.limit_usd:.2f}。\n"
+            f"使用 /addtaskmember {html.escape(snapshot.name)} <reclaude_user_id> 限定成员，/starttask {html.escape(snapshot.name)} 启动。"
+        )
+
+    @router.message(Command("deltatask"))
+    async def delete_task(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
         if not is_admin(message):
             return
         try:
-            snapshot = await task.snapshot()
+            name = await task.resolve((command.args or "").strip() or None)
+            await task.delete_task(name, message.from_user.id)  # type: ignore[union-attr]
+            await message.answer(f"限额任务 {html.escape(name)} 及其成员范围已删除。")
+        except DomainError as exc:
+            await message.answer(str(exc))
+
+    @router.message(Command("task"))
+    async def task_status(message: Message, command: CommandObject, task: QuotaTaskService, jobs: BackgroundJobs, quota: QuotaService, recovery: RecoveryService) -> None:
+        if not is_admin(message):
+            return
+        try:
+            name_arg = (command.args or "").strip() or None
+            if name_arg is None:
+                snapshots = await task.list_tasks()
+                if not snapshots:
+                    await message.answer("暂无限额任务，请先使用 /newtask 创建。")
+                    return
+                lines = [f"限额任务：{len(snapshots)} 个"]
+                for item in snapshots:
+                    if item.scope_mode == ALLOWLIST:
+                        scope = f"范围 ALLOWLIST | 成员 {len(item.member_ids)} 个"
+                    elif item.scope_mode == EXCLUDE:
+                        scope = f"范围 EXCLUDE | 排除 {len(item.member_ids)} 个"
+                    else:
+                        scope = "范围 ALL"
+                    lines.append(f"- {html.escape(item.name)} | {'RUNNING' if item.enabled else 'STOPPED'} | {scope} | 额度 ${item.limit_usd:.2f}")
+                await message.answer("\n".join(lines))
+                return
+            name = await task.resolve(name_arg)
+            snapshot = await task.snapshot(name)
             runtime = jobs.status()
-            lines = [f"限额任务：{'RUNNING' if snapshot.enabled else 'STOPPED'}"]
+            state = await recovery.gate.get_state()
+            lines = [f"任务 {html.escape(snapshot.name)}：{'RUNNING' if snapshot.enabled else 'STOPPED'}"]
+            lines.append(f"任务额度：${snapshot.limit_usd:.2f}")
             lines.append(f"调度循环：{'运行中' if runtime['loop_running'] else '未运行'}")
             lines.append(f"最近启动：{_format_datetime(runtime['started_at'])}")
             lines.append(f"最近 tick 开始：{_format_datetime(runtime['last_tick_started'])}")
@@ -229,41 +283,142 @@ def build_admin_router(settings: Settings) -> Router:
                 lines.append(f"成员范围：ALLOWLIST {html.escape(scope)}")
                 if snapshot.missing_member_ids:
                     lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
+            elif snapshot.scope_mode == EXCLUDE:
+                excluded = ", ".join(snapshot.member_ids) if snapshot.member_ids else "(empty)"
+                lines.append(f"成员范围：EXCLUDE（排除：{html.escape(excluded)}）")
+                if snapshot.missing_member_ids:
+                    lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
             else:
                 lines.append("成员范围：ALL")
-            lines.append(f"Reclaude 账号：{html.escape(snapshot.selected_account_id or '未选择')}")
-            lines.append(f"启动阻断原因：{html.escape(snapshot.reason or 'unknown')}")
+            selected = state.selected_account_id if state is not None else None
+            lines.append(f"Reclaude 账号：{html.escape(str(selected)) if selected else '未选择'}")
+            lines.append(f"写闸门状态：{'开启' if state is not None and state.write_enabled else '关闭'}（{html.escape(str(state.reason)) if state is not None else 'unknown'}）")
             cycle = await quota.current_cycle_from_now()
             lines.append(f"当前周期：{_format_datetime(cycle.reset_at if cycle is not None else None)}")
-            async with task.session_factory() as session:
+            async with quota.session_factory() as session:
                 last_sync = await session.scalar(select(func.max(UpstreamMember.sampled_at)))
             lines.append(f"最近成员同步：{_format_datetime(last_sync)}")
             await message.answer("\n".join(lines))
+        except DomainError as exc:
+            await message.answer(str(exc))
         except Exception:
             await message.answer("任务状态暂时不可用。")
 
+    @router.message(Command("taskusers"))
+    async def task_users(message: Message, command: CommandObject, task: QuotaTaskService, quota: QuotaService) -> None:
+        if not is_admin(message) or message.chat.type != "private":
+            return
+        try:
+            name = await task.resolve((command.args or "").strip() or None)
+            snapshot = await task.snapshot(name)
+            usage = await quota.list_task_usage(scope_mode=snapshot.scope_mode, member_ids=snapshot.member_ids, limit_usd=snapshot.limit_usd)
+        except DomainError as exc:
+            await message.answer(str(exc))
+            return
+        except Exception as exc:
+            log.error(
+                "task_usage_listing_failed",
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
+            await message.answer("任务成员使用状况暂时不可用。")
+            return
+        entries = usage["members"]
+        if not entries:
+            if snapshot.scope_mode == ALLOWLIST:
+                await message.answer(f"任务 {html.escape(snapshot.name)} 白名单为空，请使用 /addtaskmember 添加成员。")
+            elif snapshot.scope_mode == EXCLUDE:
+                await message.answer(f"任务 {html.escape(snapshot.name)} 范围内暂无成员：其余成员均被排除或尚未同步。")
+            else:
+                await message.answer("任务范围内暂无成员，请先执行 /sync")
+            return
+        lines = [
+            f"任务：{html.escape(snapshot.name)} | {'RUNNING' if snapshot.enabled else 'STOPPED'} | 范围：{snapshot.scope_mode} | "
+            f"成员：{len(entries)} 个 | 任务额度 ${usage['limit_usd']:.2f} | 周期刷新：{_format_datetime(usage['reset_at'])}"
+        ]
+        for entry in entries:
+            reclaude_user_id = html.escape(str(entry["reclaude_user_id"]))
+            if entry["missing_upstream"]:
+                lines.append(f"- {reclaude_user_id} | 成员已从上游消失")
+                continue
+            email = html.escape(str(entry["email"]))
+            if entry["telegram_user_id"] is not None:
+                identity = f"TG {entry['telegram_user_id']} | {html.escape(str(entry['user_status']))}"
+            else:
+                identity = "未绑定"
+            if entry["used_usd"] is None:
+                usage_text = "数据未同步"
+            else:
+                usage_text = f"已用 ${entry['used_usd']:.2f} | 剩余 ${entry['remaining_usd']:.2f}"
+            lines.append(f"- {email} | {reclaude_user_id} | {identity} | {usage_text}")
+        current = ""
+        for line in lines:
+            candidate = f"{current}\n{line}" if current else line
+            if current and len(candidate) > 4000:
+                await message.answer(current)
+                current = line
+            else:
+                current = candidate
+        if current:
+            await message.answer(current)
+
     @router.message(Command("starttask"))
-    async def start_task(message: Message, recovery: RecoveryService, jobs: BackgroundJobs) -> None:
+    async def start_task(message: Message, command: CommandObject, task: QuotaTaskService, recovery: RecoveryService, jobs: BackgroundJobs) -> None:
         if not is_admin(message):
+            return
+        try:
+            name = await task.resolve((command.args or "").strip() or None)
+        except DomainError as exc:
+            await message.answer(f"启动失败：{html.escape(str(exc))}")
             return
         try:
             account = await recovery.validate_selected_account()
-            await jobs.start_quota_task(message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"限额任务已启动，写操作已开启（账号 {account.account_id}）。")
+            await jobs.start_quota_task(name, message.from_user.id)  # type: ignore[union-attr]
+            await message.answer(f"限额任务 {html.escape(name)} 已启动，写操作已开启（账号 {account.account_id}）。")
         except DomainError as exc:
             await message.answer(f"启动失败：{html.escape(str(exc))}")
         except Exception:
-            await message.answer("启动失败，任务仍为 STOPPED，请检查 Reclaude 登录、账号状态和成员同步。")
+            await message.answer(f"启动失败，任务 {html.escape(name)} 仍为 STOPPED，请检查 Reclaude 登录、账号状态和成员同步。")
 
     @router.message(Command("stoptask"))
-    async def stop_task(message: Message, jobs: BackgroundJobs) -> None:
+    async def stop_task(message: Message, command: CommandObject, task: QuotaTaskService, jobs: BackgroundJobs) -> None:
         if not is_admin(message):
             return
         try:
-            await jobs.stop_quota_task(message.from_user.id)  # type: ignore[union-attr]
-            await message.answer("限额任务已停止，写操作和额度循环均已关闭。")
+            name = await task.resolve((command.args or "").strip() or None)
+            await jobs.stop_quota_task(name, message.from_user.id)  # type: ignore[union-attr]
+            if await task.any_enabled():
+                await message.answer(f"限额任务 {html.escape(name)} 已停止；其他任务仍在运行。")
+            else:
+                await message.answer(f"限额任务 {html.escape(name)} 已停止，写操作和额度循环均已关闭。")
+        except DomainError as exc:
+            await message.answer(str(exc))
         except Exception:
             await message.answer("停止限额任务失败，请检查服务日志。")
+
+    @router.message(Command("settaskquota"))
+    async def set_task_quota(message: Message, command: CommandObject, admin: AdminService) -> None:
+        if not is_admin(message):
+            return
+        values = (command.args or "").split()
+        if len(values) == 2:
+            name_arg: str | None = values[0]
+            amount_arg = values[1]
+        elif len(values) == 1:
+            name_arg, amount_arg = None, values[0]
+        else:
+            await message.answer("用法：/settaskquota <任务名> 金额（仅一个任务时可省略任务名）")
+            return
+        try:
+            amount = Decimal(amount_arg)
+        except InvalidOperation:
+            await message.answer("用法：/settaskquota <任务名> 金额")
+            return
+        try:
+            name, value = await admin.set_task_quota(name_arg, amount, message.from_user.id)  # type: ignore[union-attr]
+            await message.answer(f"任务 {html.escape(name)} 每用户额度已设置为 ${value:.2f}")
+        except DomainError as exc:
+            await message.answer(str(exc))
 
     @router.message(Command("addtaskmember"))
     async def add_task_member(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
@@ -271,11 +426,16 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             values = (command.args or "").split()
-            result = await task.add_members(values, message.from_user.id)  # type: ignore[union-attr]
-            if values and values[0].casefold() == "all":
-                await message.answer("限额任务成员范围已切回 ALL，旧白名单已清理。")
+            name, ids = await task.resolve_members_args(values, usage="用法：/addtaskmember <任务名> <reclaude_user_id> ...（仅一个任务时可省略任务名）")
+            result = await task.add_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
+            if len(ids) == 1 and ids[0].casefold() == "all":
+                await message.answer(f"任务 {html.escape(name)} 成员范围已切回 ALL，旧成员名单已清理。")
             else:
-                await message.answer(f"已加入限额任务成员：{html.escape(', '.join(result))}（范围为 ALLOWLIST）")
+                snapshot = await task.snapshot(name)
+                if snapshot.scope_mode == EXCLUDE:
+                    await message.answer(f"已将成员重新纳入任务 {html.escape(name)}：{html.escape(', '.join(result))}（范围为 EXCLUDE，剩余排除 {len(snapshot.member_ids)} 个）")
+                else:
+                    await message.answer(f"已加入任务 {html.escape(name)} 成员：{html.escape(', '.join(result))}（范围为 ALLOWLIST）")
         except DomainError as exc:
             await message.answer(f"成员范围更新失败：{html.escape(str(exc))}")
 
@@ -285,8 +445,13 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             values = (command.args or "").split()
-            result = await task.delete_members(values, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"已移除限额任务成员：{html.escape(', '.join(result))}；剩余为空时不会执行任何配额动作。")
+            name, ids = await task.resolve_members_args(values, usage="用法：/deletetaskmember <任务名> <reclaude_user_id> ...（仅一个任务时可省略任务名）")
+            result = await task.delete_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
+            snapshot = await task.snapshot(name)
+            if snapshot.scope_mode == EXCLUDE:
+                await message.answer(f"已将成员从任务 {html.escape(name)} 排除：{html.escape(', '.join(result))}（范围为 EXCLUDE，其余及新加入成员仍被覆盖）")
+            else:
+                await message.answer(f"已移除任务 {html.escape(name)} 成员：{html.escape(', '.join(result))}；剩余为空时不会执行任何配额动作。")
         except DomainError as exc:
             await message.answer(f"成员范围更新失败：{html.escape(str(exc))}")
 

@@ -72,8 +72,8 @@ async def run() -> None:
     binding = BindingService(session_factory, gateway, settings.bind_attempts_per_hour, gate=gate, onboarding=onboarding)
     recovery = RecoveryService(gate, quota, gateway, settings)
     await recovery.restore_persisted_account(startup_state)
-    admin = AdminService(session_factory, quota, actions)
     task = QuotaTaskService(session_factory, gateway)
+    admin = AdminService(session_factory, quota, actions, task)
     jobs = BackgroundJobs(quota, actions, onboarding_worker, task_service=task)
     dp = Dispatcher()
     dp["binding"] = binding
@@ -92,7 +92,7 @@ async def run() -> None:
     try:
         await register_command_menus(bot, settings.telegram_admin_ids)
         await jobs.start(start_quota=False)
-        if startup_state.quota_task_enabled:
+        if await task.any_enabled():
             try:
                 await recovery.validate_selected_account()
                 await jobs.resume_quota_task()

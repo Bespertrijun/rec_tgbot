@@ -14,6 +14,11 @@ class UserStatus(StrEnum):
     BANNED = "BANNED"
 
 
+class TaskStatus(StrEnum):
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+
+
 class BaselineStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
     VERIFIED = "VERIFIED"

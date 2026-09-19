@@ -16,10 +16,17 @@ from reclaude_bot.infrastructure.db.models import AuditLog, User
 class AdminService:
     """Administrative state changes; Telegram-ID authorization remains in handlers."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], quota: QuotaService | None = None, actions: Any | None = None) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        quota: QuotaService | None = None,
+        actions: Any | None = None,
+        task: Any | None = None,
+    ) -> None:
         self.session_factory = session_factory
         self.quota = quota
         self.actions = actions
+        self.task = task
 
     async def set_banned(self, user_id: int, operator_id: int, banned: bool) -> User:
         async with self.session_factory() as session:
@@ -35,12 +42,21 @@ class AdminService:
                 return user
 
     async def set_quota(self, amount: Decimal, operator_id: int) -> Decimal:
+        """Set the global default limit used for newly created tasks."""
+
         if self.quota is None:
             raise EligibilityError("额度服务尚未初始化")
-        value = await self.quota.set_quota(amount, operator_id)
+        return await self.quota.set_quota(amount, operator_id)
+
+    async def set_task_quota(self, name: str | None, amount: Decimal, operator_id: int) -> tuple[str, Decimal]:
+        """Set one task's per-user limit and immediately reconcile enforcement."""
+
+        if self.task is None:
+            raise EligibilityError("任务服务尚未初始化")
+        resolved, value = await self.task.set_limit(name, amount, operator_id)
         if self.actions is not None:
             await self.actions.reconcile_cached()
-        return value
+        return resolved, value
 
     async def list_users(self) -> list[User]:
         async with self.session_factory() as session:

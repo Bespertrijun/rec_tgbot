@@ -13,20 +13,32 @@ The service fails closed when a selected account is not live, its lifecycle is n
 health is empty or `banned`, its `account_id` is missing or invalid, or a session request returns
 `401`. `/account` is a read-only live inventory (including a banned current account); `/use <account_id>`
 validates one selected record, reconciles it, and persists the selection without enabling writes.
-Use `/starttask` as the single operator write switch, and `/stoptask` to close writes and the quota
-loop together. The legacy `/recovery_enable` command retains the stricter single-bound-account
-discovery flow but does not independently start the task. The account record's separate database
-`id` is never used. No retry is attempted after the first `401` until the recovery runbook is
-completed.
+Use `/starttask <name>` as the operator write switch per task, and `/stoptask <name>` to stop one;
+the shared quota loop and write latch stay open while any task remains `RUNNING`. The legacy
+`/recovery_enable` command retains the stricter single-bound-account discovery flow but does not
+independently start any task. The account record's separate database `id` is never used. No retry
+is attempted after the first `401` until the recovery runbook is completed.
 
-The quota task starts stopped on a new database. Its `RUNNING`/`STOPPED` state survives a restart;
-a persisted `RUNNING` state resumes only after startup validates the selected account. The internal
-`RecoveryGate` remains a fail-safe for startup validation, invalid accounts, and 401 recovery.
-`/task` reports the state and best-effort tick health. `/member` lists all cached upstream member
-emails and Reclaude user IDs for use with `/addtaskmember`. Member scope defaults to `ALL`; use
-`/addtaskmember <reclaude_user_id> ...` to create an `ALLOWLIST`, `/deletetaskmember ...` to remove
-IDs, and `/addtaskmember all` to clear the allowlist and return to `ALL`. Group onboarding remains
-independent of the quota task.
+Quota enforcement is organized as multiple named tasks (`quota_tasks`), each with its own per-user
+limit and member scope. All tasks run against the single selected Reclaude account. Create one with
+`/newtask <name> [limit]` (the limit defaults to the global `/setquota` value) and remove it with
+`/deltatask <name>`. Tasks start stopped on a new database; the migration carries the previous
+single-task switch and allowlist into a `default` task. A persisted `RUNNING` state survives a
+restart and resumes only after startup validates the selected account. The internal `RecoveryGate`
+remains a fail-safe for startup validation, invalid accounts, and 401 recovery, and stops all
+running tasks when it trips. `/task` lists every task, `/task <name>` reports one task's state and
+best-effort tick health. `/member` lists all cached upstream member emails and Reclaude user IDs for
+use with `/addtaskmember`. Member scope defaults to `ALL`; use
+`/addtaskmember <name> <reclaude_user_id> ...` to create an `ALLOWLIST`, `/deletetaskmember <name> ...`
+to remove IDs, and `/addtaskmember <name> all` to clear the member list and return to `ALL`. Deleting
+from an `ALL` (or `EXCLUDE`) task switches it to `EXCLUDE`: the listed IDs are excluded while every
+other current and future upstream member stays covered; `/addtaskmember <name> <id>` on an `EXCLUDE`
+task re-includes the ID. When only
+one task exists its name may be omitted. Change a task's limit with `/settaskquota <name> <amount>`;
+the new limit reconciles immediately from the local cache. `/taskusers <name>` works in admin
+private chats only and lists every scoped member's current-cycle usage against the task limit.
+A member covered by several RUNNING tasks is enforced at the strictest (smallest) limit, because
+upstream revocation is account-level. Group onboarding remains independent of the quota tasks.
 
 Quota writes also require a fresh `/members` snapshot. The default maximum age is 90 seconds;
 future-dated or older snapshots are ignored until the next normal members sync. Override this

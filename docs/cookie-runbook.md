@@ -25,6 +25,7 @@
    account ID or email mask is configured in `.env`.
 5. Inspect pending quota revocations. `/starttask` is the only command that may resume quota
    enforcement writes after the checks pass; `/use` only selects and reconciles the account.
-   `/stoptask` closes both writes and the quota loop. The first `401` forces the durable task back
+   `/stoptask` stops the task; writes and the quota loop close only while no task remains
+   `RUNNING`. The first `401` forces every durable task back
    to `STOPPED` and requires this procedure; normal polling and write requests never retry the
    password login automatically.

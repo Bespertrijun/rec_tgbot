@@ -45,7 +45,7 @@ class BackgroundJobs:
         if not start_quota:
             return
         if self.task_service is not None:
-            if await self.task_service.is_enabled():
+            if await self.task_service.any_enabled():
                 await self.resume_quota_task()
         elif self.gate is None:
             # Keep the lightweight constructor useful for isolated scheduler tests.
@@ -57,45 +57,47 @@ class BackgroundJobs:
         if self.onboarding is not None:
             await self.onboarding.stop()
 
-    async def start_quota_task(self, operator_id: int | None = None, *, persist: bool = True) -> bool:
-        """Start at most one quota loop, after its durable transition has succeeded."""
+    async def start_quota_task(self, name: str | None = None, operator_id: int | None = None, *, persist: bool = True) -> bool:
+        """Start at most one shared quota loop, after its durable transition has succeeded."""
 
         if self.task_service is not None and persist:
-            changed = await self.task_service.start(operator_id)
+            changed = await self.task_service.start(name, operator_id)
         else:
             changed = self._task is None or self._task.done()
             if self.task_service is not None and not persist:
-                if not await self.task_service.is_enabled():
+                if not await self.task_service.any_enabled():
                     return False
                 await self.task_service.enable_latch()
         if self._task is not None and not self._task.done():
             return changed
         self._quota_stop.clear()
         self._task = asyncio.create_task(self._loop())
-        log.info("quota_task_started", operator_id=operator_id, persisted=persist)
+        log.info("quota_task_started", task=name, operator_id=operator_id, persisted=persist)
         return changed
 
     async def resume_quota_task(self) -> bool:
         if self.task_service is not None:
-            if not await self.task_service.is_enabled():
+            if not await self.task_service.any_enabled():
                 return False
             await self.task_service.enable_latch()
         elif self.gate is not None:
-            if not await self.gate.is_task_enabled():
+            if not await self.gate.is_enabled():
                 return False
-            await self.gate.enable_latch()
         return await self.start_quota_task(persist=False)
 
-    async def stop_quota_task(self, operator_id: int | None = None) -> bool:
+    async def stop_quota_task(self, name: str | None = None, operator_id: int | None = None) -> bool:
         if self.task_service is not None:
-            changed = await self.task_service.stop(operator_id)
+            changed = await self.task_service.stop(name, operator_id)
+            if await self.task_service.any_enabled():
+                # Other tasks keep running; the shared loop and latch stay up.
+                return changed
         elif self.gate is not None:
             await self.gate.force_stop("quota_task_stopped")
             changed = True
         else:
             changed = self._task is not None and not self._task.done()
         await self._cancel_quota_loop()
-        log.info("quota_task_stopped", operator_id=operator_id)
+        log.info("quota_task_stopped", task=name, operator_id=operator_id)
         return changed
 
     async def run_tick(self) -> int:
@@ -152,9 +154,9 @@ class BackgroundJobs:
 
     async def _task_is_enabled(self) -> bool:
         if self.task_service is not None:
-            return await self.task_service.is_enabled()
+            return await self.task_service.any_enabled()
         if self.gate is not None:
-            return await self.gate.is_task_enabled()
+            return await self.gate.is_enabled()
         return True
 
     async def _cancel_quota_loop(self) -> None:

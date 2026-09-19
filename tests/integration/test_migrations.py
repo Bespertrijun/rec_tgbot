@@ -113,11 +113,64 @@ def test_quota_task_migration_backfills_previous_write_state(tmp_path, monkeypat
     engine = create_engine(f"sqlite:///{database}")
     try:
         with engine.connect() as connection:
-            state = connection.execute(
-                text("SELECT quota_task_enabled, quota_task_scope_mode FROM service_state WHERE id = 1")
+            task = connection.execute(text("SELECT status, scope_mode FROM quota_tasks WHERE name_normalized = 'default'")).one()
+            assert task.status == "RUNNING"
+            assert task.scope_mode == "ALL"
+        service_columns = {column["name"] for column in inspect(engine).get_columns("service_state")}
+        assert "quota_task_enabled" not in service_columns
+        assert "quota_task_scope_mode" not in service_columns
+    finally:
+        engine.dispose()
+
+
+def test_multi_task_migration_backfills_members_and_downgrades(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "multi-task-backfill.db"
+    config = _alembic_config(database)
+
+    command.upgrade(config, "0005_quota_task_controls")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO service_state
+                        (id, write_enabled, quota_task_enabled, reason, updated_at)
+                    VALUES (1, 1, 1, 'operator_enabled_after_reconcile', '2026-08-19T00:00:00+00:00')
+                    """
+                )
+            )
+            connection.execute(
+                text("INSERT INTO quota_task_members (reclaude_user_id, added_by, added_at) VALUES ('u-1', 1, '2026-08-19T00:00:00+00:00')")
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT quota_tasks.name, quota_tasks.status, quota_task_members.reclaude_user_id "
+                    "FROM quota_task_members JOIN quota_tasks ON quota_tasks.id = quota_task_members.task_id"
+                )
             ).one()
+            assert (row.name, row.status, row.reclaude_user_id) == ("default", "RUNNING", "u-1")
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0005_quota_task_controls")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        assert not inspect(engine).has_table("quota_tasks")
+        with engine.connect() as connection:
+            state = connection.execute(text("SELECT quota_task_enabled, quota_task_scope_mode FROM service_state WHERE id = 1")).one()
             assert state.quota_task_enabled == 1
             assert state.quota_task_scope_mode == "ALL"
+            member = connection.execute(text("SELECT reclaude_user_id FROM quota_task_members")).one()
+            assert member.reclaude_user_id == "u-1"
     finally:
         engine.dispose()
 

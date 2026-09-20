@@ -16,6 +16,7 @@ from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryService
 from reclaude_bot.application.task import ALLOWLIST, EXCLUDE, QuotaTaskService
+from reclaude_bot.application.updater import UpdateError, UpdateService
 from reclaude_bot.bot.middleware import GroupAccessMiddleware
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError
@@ -499,6 +500,32 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer(str(exc))
         except Exception:
             await message.answer("恢复失败，写操作仍已暂停，请检查 Reclaude 登录和账号状态。")
+
+    @router.message(Command("update"))
+    async def update(message: Message, updater: UpdateService) -> None:
+        if not is_admin(message):
+            return
+        if not updater.available:
+            await message.answer("自动更新不可用：容器未挂载 Docker socket。")
+            return
+        if updater.in_progress:
+            await message.answer("已有更新正在进行中。")
+            return
+        async with updater.run():
+            await message.answer("正在检查并拉取最新镜像…")
+            try:
+                check = await updater.check_for_update()
+            except UpdateError as exc:
+                await message.answer(f"更新失败：{exc}")
+                return
+            if not check.changed:
+                await message.answer(f"当前已是最新版本（{check.image_spec}）。")
+                return
+            await message.answer("发现新版本，正在更新，Bot 将短暂离线后自动恢复，完成后会通知你。")
+            try:
+                await updater.apply_update(check, message.chat.id)
+            except UpdateError as exc:
+                await message.answer(f"更新失败：{exc}")
 
     return router
 

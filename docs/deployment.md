@@ -185,6 +185,48 @@ Use the previous known-good SHA for a rollback. Re-run `/account`, `/use <accoun
 `/starttask` only after reviewing the persisted task state and account health. Never roll back by copying a Cookie or `.env`
 from another host.
 
+### Self-update via the `/update` admin command (optional)
+
+The production Compose file mounts the host Docker socket and an update state
+directory (`./data/update`) into the bot container, which enables the admin-only
+`/update` command. One-time prerequisite: recreate the bot container with the
+updated Compose file (`docker compose up -d bot`) so the mounts take effect.
+
+Sending `/update` from an administrator account then:
+
+1. Inspects the running container over the Docker socket and pulls whatever image
+   it was created from (the Compose default is never consulted; a pinned
+   `sha-<commit>` tag simply never changes). When the tag still points at the same
+   image ID, the reply is "已是最新" and nothing is restarted.
+2. When a new image was pulled, the container is swapped by a throwaway helper
+   container (`docker:cli`, pulled on demand): the old container is stopped, a
+   replacement with the same env/binds/restart policy/network is started, and the
+   helper watches it for a short grace period.
+3. The admin chat always receives the outcome: "更新完成" with the new image
+   fingerprint, "更新失败：…已自动回滚" when the new container fails the grace
+   check (the old container is restored automatically), or an interruption warning
+   when no result arrives. Failures before the swap (pull errors, missing mounts)
+   are answered directly by the still-running old bot.
+
+Security notes and limitations:
+
+- The mounted socket is host-root-equivalent. Only `TELEGRAM_ADMIN_IDS` can trigger
+  the command, the bot process stays unprivileged (the entrypoint only adds the
+  socket's owning group), and the helper container is a one-shot `--rm` container
+  that never sees the bot token. Remove the socket mount to disable the feature
+  entirely (`/update` then answers that it is unavailable).
+- `/update` only replaces the bot image. It does not `git pull`; Compose or `.env`
+  changes still go through the CI deploy job or a manual deploy.
+- The replacement container keeps the Compose labels, so `docker compose ps` keeps
+  working; the next manual `docker compose up -d` may recreate it once more due to
+  config-hash drift, which is harmless.
+- The flow relies on the default container hostname (the container ID) to locate
+  itself; do not set `hostname:` on the bot service. If the host crashes in the
+  few seconds between the rename and the helper finishing, start the
+  `<name>-updating` container manually.
+- Rollback restores the container only; database migrations are forward-only and
+  must stay backward compatible.
+
 ## Inspecting and retiring old named volumes
 
 The previous Compose file created project-prefixed named volumes. List the exact names

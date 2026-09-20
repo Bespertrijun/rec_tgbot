@@ -55,6 +55,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
             {"command": "deletetaskmember", "description": "移除限额任务成员"},
             {"command": "settaskquota", "description": "设置任务每用户额度"},
             {"command": "taskusers", "description": "查看任务成员使用状况"},
+            {"command": "update", "description": "更新并重启 Bot"},
             {"command": "recovery_enable", "description": "兼容旧版恢复命令"},
         ]
 

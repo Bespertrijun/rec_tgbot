@@ -22,10 +22,14 @@ services:
     environment:
       RECLAUDE_COOKIE_JAR_PATH: /var/lib/reclaude-bot/cookies/cookies.json
       LOG_FILE_PATH: /var/lib/reclaude-bot/logs/reclaude-bot.log
+      UPDATE_STATE_FILE: /var/lib/reclaude-bot/update/pending.json
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - ./data/cookies:/var/lib/reclaude-bot/cookies
       - ./data/logs:/var/lib/reclaude-bot/logs
+      - ./data/update:/var/lib/reclaude-bot/update
+      # Enables the admin-only /update self-update command; remove to disable it.
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

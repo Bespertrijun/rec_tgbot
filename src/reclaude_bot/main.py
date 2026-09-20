@@ -14,6 +14,7 @@ from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.application.task import QuotaTaskService
+from reclaude_bot.application.updater import UpdateService, cleanup_stale_updating_container, consume_restart_notification
 from reclaude_bot.bot.commands import register_command_menus
 from reclaude_bot.bot.groups import TelegramGroupGateway, build_group_router
 from reclaude_bot.bot.handlers import build_admin_router, build_router
@@ -75,6 +76,7 @@ async def run() -> None:
     task = QuotaTaskService(session_factory, gateway)
     admin = AdminService(session_factory, quota, actions, task)
     jobs = BackgroundJobs(quota, actions, onboarding_worker, task_service=task)
+    updater = UpdateService(settings)
     dp = Dispatcher()
     dp["binding"] = binding
     dp["quota"] = quota
@@ -86,11 +88,14 @@ async def run() -> None:
     dp["groups"] = groups
     dp["onboarding"] = onboarding
     dp["onboarding_worker"] = onboarding_worker
+    dp["updater"] = updater
     dp.include_router(build_router(settings))
     dp.include_router(build_admin_router(settings))
     dp.include_router(build_group_router(settings))
     try:
         await register_command_menus(bot, settings.telegram_admin_ids)
+        await cleanup_stale_updating_container()
+        asyncio.create_task(consume_restart_notification(bot, settings))
         await jobs.start(start_quota=False)
         if await task.any_enabled():
             try:

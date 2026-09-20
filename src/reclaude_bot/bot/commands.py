@@ -35,6 +35,7 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("deletetaskmember", "移除限额任务成员"),
     ("settaskquota", "设置任务每用户额度"),
     ("taskusers", "查看任务成员使用状况"),
+    ("update", "更新并重启 Bot"),
     ("recovery_enable", "兼容旧版恢复命令"),
 )
 

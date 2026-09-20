@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     quota_limit_usd: Decimal = Field(default=Decimal("700.00"), alias="QUOTA_LIMIT_USD")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_file_path: Path | None = Field(default=None, alias="LOG_FILE_PATH")
+    update_state_file: Path = Field(default=Path("data/update/pending.json"), alias="UPDATE_STATE_FILE")
     bind_attempts_per_hour: int = 10
 
     @field_validator("telegram_admin_ids", mode="before")

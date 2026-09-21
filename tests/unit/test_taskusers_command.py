@@ -40,19 +40,18 @@ def _account() -> SimpleNamespace:
     return SimpleNamespace(
         email_masked="ma****@rekwa.com",
         usage_updated_at=datetime(2026, 8, 18, 5, 0, tzinfo=UTC),
-        five_hour_utilization=Decimal("0"),
+        five_hour_utilization=Decimal("27"),
         five_hour_resets_at=None,
-        five_hour_projected=None,
         seven_day_utilization=Decimal("6"),
         seven_day_resets_at=datetime(2026, 8, 25, 5, 0, tzinfo=UTC),
-        seven_day_projected=Decimal("12.5"),
+        seven_day_estimated_total=Decimal("3500"),
     )
 
 
 _ACCOUNT_LINES = (
     "账号：ma****@rekwa.com（快照 2026-08-18T05:00:00+00:00）\n"
-    "5h 限额：已用 0.0% | 重置：未激活 | 预估：—\n"
-    "7天限额：已用 6.0% | 重置：2026-08-25T05:00:00+00:00 | 预估：12.5%"
+    "5h 限额：已用 27.0% | 重置：未激活\n"
+    "7天限额：已用 6.0% | 重置：2026-08-25T05:00:00+00:00 | 预估总额度：≈$3500.00"
 )
 
 

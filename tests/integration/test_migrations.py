@@ -65,7 +65,9 @@ def test_sqlite_upgrade_enforces_append_only_and_downgrade_cleans_up(tmp_path, m
                 connection.execute(text("DELETE FROM audit_logs WHERE id = 1"))
 
         assert inspect(engine).has_table("service_state")
-        assert "selected_account_id" in {column["name"] for column in inspect(engine).get_columns("service_state")}
+        service_state_columns = {column["name"] for column in inspect(engine).get_columns("service_state")}
+        assert "selected_account_id" in service_state_columns
+        assert "sync_enabled" in service_state_columns
     finally:
         engine.dispose()
 
@@ -116,6 +118,8 @@ def test_quota_task_migration_backfills_previous_write_state(tmp_path, monkeypat
             task = connection.execute(text("SELECT status, scope_mode FROM quota_tasks WHERE name_normalized = 'default'")).one()
             assert task.status == "RUNNING"
             assert task.scope_mode == "ALL"
+            state = connection.execute(text("SELECT sync_enabled FROM service_state WHERE id = 1")).one()
+            assert state.sync_enabled == 1
         service_columns = {column["name"] for column in inspect(engine).get_columns("service_state")}
         assert "quota_task_enabled" not in service_columns
         assert "quota_task_scope_mode" not in service_columns

@@ -100,10 +100,12 @@ async def run() -> None:
         if await task.any_enabled():
             try:
                 await recovery.validate_selected_account()
-                await jobs.resume_quota_task()
             except Exception as exc:
                 await gate.force_stop("startup_task_validation_failed")
                 await operational_alert(f"限额任务启动校验失败，已保持 STOPPED：{exc}")
+        # The quota loop always runs: usage sync continues while tasks are STOPPED;
+        # resume_quota_task re-opens the write latch only when a task is RUNNING.
+        await jobs.resume_quota_task()
         allowed_updates = dp.resolve_used_update_types()
         await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:

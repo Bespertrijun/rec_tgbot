@@ -376,7 +376,10 @@ def build_admin_router(settings: Settings) -> Router:
         try:
             account = await recovery.validate_selected_account()
             await jobs.start_quota_task(name, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"限额任务 {html.escape(name)} 已启动，写操作已开启（账号 {account.account_id}）。")
+            reply = f"限额任务 {html.escape(name)} 已启动，写操作已开启（账号 {account.account_id}）。"
+            if not await task.sync_enabled():
+                reply += "\n注意：数据统计当前已停止，配额动作不会自动执行；恢复统计请使用 /startstats。"
+            await message.answer(reply)
         except DomainError as exc:
             await message.answer(f"启动失败：{html.escape(str(exc))}")
         except Exception:
@@ -392,11 +395,31 @@ def build_admin_router(settings: Settings) -> Router:
             if await task.any_enabled():
                 await message.answer(f"限额任务 {html.escape(name)} 已停止；其他任务仍在运行。")
             else:
-                await message.answer(f"限额任务 {html.escape(name)} 已停止，写操作和额度循环均已关闭。")
+                await message.answer(f"限额任务 {html.escape(name)} 已停止，写操作已关闭；用量数据仍会继续同步统计。")
         except DomainError as exc:
             await message.answer(str(exc))
         except Exception:
             await message.answer("停止限额任务失败，请检查服务日志。")
+
+    @router.message(Command("startstats"))
+    async def start_stats(message: Message, jobs: BackgroundJobs) -> None:
+        if not is_admin(message):
+            return
+        try:
+            await jobs.start_usage_sync(message.from_user.id)  # type: ignore[union-attr]
+            await message.answer("数据统计已启动，用量同步循环运行中。")
+        except Exception:
+            await message.answer("启动数据统计失败，请检查服务日志。")
+
+    @router.message(Command("stopstats"))
+    async def stop_stats(message: Message, jobs: BackgroundJobs) -> None:
+        if not is_admin(message):
+            return
+        try:
+            await jobs.stop_usage_sync(message.from_user.id)  # type: ignore[union-attr]
+            await message.answer("数据统计已停止，用量同步循环已关闭；限额任务与写闸门状态保持不变。")
+        except Exception:
+            await message.answer("停止数据统计失败，请检查服务日志。")
 
     @router.message(Command("settaskquota"))
     async def set_task_quota(message: Message, command: CommandObject, admin: AdminService) -> None:
@@ -545,8 +568,8 @@ async def _account_usage_lines(quota: QuotaService) -> list[str]:
     five_hour_reset = _format_datetime(account.five_hour_resets_at) if account.five_hour_resets_at is not None else "未激活"
     return [
         f"账号：{html.escape(account.email_masked)}（快照 {_format_datetime(account.usage_updated_at)}）",
-        f"5h 限额：已用 {_format_percent(account.five_hour_utilization)} | 重置：{five_hour_reset} | 预估：{_format_projection(account.five_hour_projected)}",
-        f"7天限额：已用 {_format_percent(account.seven_day_utilization)} | 重置：{_format_datetime(account.seven_day_resets_at)} | 预估：{_format_projection(account.seven_day_projected)}",
+        f"5h 限额：已用 {_format_percent(account.five_hour_utilization)} | 重置：{five_hour_reset}",
+        f"7天限额：已用 {_format_percent(account.seven_day_utilization)} | 重置：{_format_datetime(account.seven_day_resets_at)} | 预估总额度：{_format_estimated_total(account.seven_day_estimated_total)}",
     ]
 
 
@@ -554,8 +577,5 @@ def _format_percent(value: Decimal | None) -> str:
     return f"{value:.1f}%" if value is not None else "未知"
 
 
-def _format_projection(value: Decimal | None) -> str:
-    if value is None:
-        return "—"
-    warning = "（将触顶）" if value >= Decimal("100") else ""
-    return f"{value:.1f}%{warning}"
+def _format_estimated_total(value: Decimal | None) -> str:
+    return f"≈${value:.2f}" if value is not None else "—"

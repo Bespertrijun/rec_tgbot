@@ -152,6 +152,7 @@ class ServiceState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sync_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     reason: Mapped[str] = mapped_column(String(128), default="startup_recovery_required", nullable=False)
     selected_account_id: Mapped[str | None] = mapped_column(String(128))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

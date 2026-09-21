@@ -229,6 +229,31 @@ class QuotaTaskService:
         async with self.session_factory() as session:
             return await self._any_running(session)
 
+    async def sync_enabled(self) -> bool:
+        async with self.session_factory() as session:
+            state = await self._ensure_state(session)
+            return bool(state.sync_enabled)
+
+    async def set_sync_enabled(self, enabled: bool, operator_id: int | None = None) -> bool:
+        """Flip the durable usage-sync switch; returns True when it changed."""
+
+        async with self.session_factory() as session:
+            async with session.begin():
+                state = await self._ensure_state(session, with_for_update=True)
+                changed = bool(state.sync_enabled) != enabled
+                state.sync_enabled = enabled
+                state.updated_at = utcnow()
+                await audit(
+                    session,
+                    actor_telegram_id=operator_id,
+                    actor_type="ADMIN" if operator_id is not None else "SYSTEM",
+                    action="USAGE_SYNC_STARTED" if enabled else "USAGE_SYNC_STOPPED",
+                    target_type="SERVICE",
+                    target_id="1",
+                    result="SUCCESS" if changed else "NOOP",
+                )
+                return changed
+
     async def set_limit(self, name: str | None, amount: Decimal, operator_id: int) -> tuple[str, Decimal]:
         resolved = await self.resolve(name)
         amount = as_decimal(amount)

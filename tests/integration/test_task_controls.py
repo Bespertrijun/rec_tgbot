@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -126,12 +127,18 @@ async def test_start_stop_persist_and_do_not_affect_group_worker(app_context, fi
         assert state is not None
         assert state.write_enabled is False
     assert (await task.snapshot("default")).enabled is False
+    # The shared loop survives the stop: usage sync continues while writes stay closed.
+    assert jobs.status()["loop_running"] is True
+    await jobs.stop()
+    assert jobs.status()["loop_running"] is False
 
-    # A new BackgroundJobs instance observes the persisted stop and does not tick.
+    # A new BackgroundJobs instance still syncs members on tick but never writes.
     replacement = BackgroundJobs(quota, actions, task_service=task)
     members_calls = gateway.members_calls
-    assert await replacement.run_tick() == 0
-    assert gateway.members_calls == members_calls
+    assert await replacement.run_tick(now=datetime(2026, 8, 18, tzinfo=UTC)) == 1
+    assert gateway.members_calls == members_calls + 1
+    assert gateway.revoke_calls == []
+    assert gateway.assign_calls == []
 
 
 @pytest.mark.asyncio
@@ -164,7 +171,7 @@ async def test_latch_stays_open_while_other_tasks_run(app_context, fixed_clock):
 
 
 @pytest.mark.asyncio
-async def test_stopped_task_never_refreshes_cycle_or_members(app_context):
+async def test_stopped_task_still_syncs_members_without_writes(app_context):
     factory, gateway, settings = app_context
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
@@ -175,8 +182,10 @@ async def test_stopped_task_never_refreshes_cycle_or_members(app_context):
     jobs = BackgroundJobs(quota, actions, task_service=task)
 
     before_members = gateway.members_calls
-    assert await jobs.run_tick() == 0
-    assert gateway.members_calls == before_members
+    assert await jobs.run_tick(now=datetime(2026, 8, 18, tzinfo=UTC)) == 1
+    assert gateway.members_calls == before_members + 1
+    assert gateway.revoke_calls == []
+    assert gateway.assign_calls == []
     assert await task.any_enabled() is False
     assert await gate.is_enabled() is False
 
@@ -236,3 +245,80 @@ async def test_delete_task_removes_scope_and_closes_latch(app_context, fixed_clo
         assert (await session.scalars(select(QuotaTaskMember))).all() == []
         actions = list((await session.scalars(select(AuditLog).where(AuditLog.action == "QUOTA_TASK_DELETED"))).all())
         assert len(actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_sync_switch_controls_loop_and_ticks(app_context, fixed_clock):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    quota = QuotaService(factory, gateway, settings)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+    await recovery.select_account(4949, 1)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    actions = QuotaActionService(factory, gateway, quota, settings, gate=gate)
+    jobs = BackgroundJobs(quota, actions, task_service=task)
+
+    # The switch defaults to on: ticks sync members and the loop starts.
+    assert await task.sync_enabled() is True
+    assert await jobs.run_tick(now=datetime(2026, 8, 18, tzinfo=UTC)) == 1
+    await jobs.start_quota_task("default", 1)
+    await asyncio.sleep(0.05)
+    assert jobs.status()["loop_running"] is True
+
+    # Stopping stats cancels the loop and blocks ticks; the task and latch stay untouched.
+    assert await jobs.stop_usage_sync(1) is True
+    assert jobs.status()["loop_running"] is False
+    assert await task.sync_enabled() is False
+    assert await task.any_enabled() is True
+    assert await gate.is_enabled() is True
+    members_calls = gateway.members_calls
+    assert await jobs.run_tick(now=datetime(2026, 8, 18, tzinfo=UTC)) == 0
+    assert gateway.members_calls == members_calls
+
+    # The stopped switch persists across instances, so a restart does not resume the loop.
+    replacement = BackgroundJobs(quota, actions, task_service=task)
+    assert await replacement.resume_quota_task() is False
+    assert replacement.status()["loop_running"] is False
+
+    # Starting stats again resumes ticks and the loop without reviving writes by itself.
+    assert await replacement.start_usage_sync(1) is True
+    assert replacement.status()["loop_running"] is True
+    assert await task.sync_enabled() is True
+    await replacement.stop()
+    assert replacement.status()["loop_running"] is False
+    members_calls = gateway.members_calls
+    assert await replacement.run_tick(now=datetime(2026, 8, 18, tzinfo=UTC)) == 1
+    assert gateway.members_calls == members_calls + 1
+    assert gateway.revoke_calls == []
+    assert gateway.assign_calls == []
+    async with factory() as session:
+        logged = {row.action for row in (await session.scalars(select(AuditLog))).all()}
+        assert {"USAGE_SYNC_STOPPED", "USAGE_SYNC_STARTED"} <= logged
+
+
+@pytest.mark.asyncio
+async def test_starttask_while_sync_stopped_marks_running_without_loop(app_context, fixed_clock):
+    factory, gateway, settings = app_context
+    gate = RecoveryGate(factory)
+    await gate.ensure_disabled()
+    quota = QuotaService(factory, gateway, settings)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+    await recovery.select_account(4949, 1)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    actions = QuotaActionService(factory, gateway, quota, settings, gate=gate)
+    jobs = BackgroundJobs(quota, actions, task_service=task)
+
+    # With stats stopped the task still flips to RUNNING and the latch opens, but no loop runs.
+    assert await jobs.stop_usage_sync(1) is True
+    assert await jobs.start_quota_task("default", 1) is True
+    assert await task.any_enabled() is True
+    assert await gate.is_enabled() is True
+    assert jobs.status()["loop_running"] is False
+
+    # Starting stats afterwards brings the loop up for the already-RUNNING task.
+    await jobs.start_usage_sync(1)
+    assert jobs.status()["loop_running"] is True
+    await jobs.stop()

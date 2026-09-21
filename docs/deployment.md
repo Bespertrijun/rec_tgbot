@@ -166,7 +166,8 @@ shows both `db` and `bot` running. On every initial start, restart, upgrade, rol
 restore, complete the read-only checks with `/account`, explicitly select and reconcile a
 healthy account with `/use <account_id>`, then send `/starttask` from an administrator account
 to enable quota writes. `/stoptask` persists the stopped state across restarts; group onboarding
-continues while the quota task is stopped.
+and usage sync continue while the quota task is stopped. Use `/stopstats` to pause the usage sync
+itself (also persisted across restarts) and `/startstats` to resume it.
 
 ## Upgrade and rollback
 

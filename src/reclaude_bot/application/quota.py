@@ -14,29 +14,29 @@ from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import BaselineStatus, CycleStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import as_decimal, baseline_is_timely, cycle_used, ensure_utc, is_last_24h, project_window_utilization
+from reclaude_bot.domain.quota import as_decimal, baseline_is_timely, cycle_used, ensure_utc, estimate_window_total, is_last_24h
 from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaCycle, RuntimeSetting, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import MembersResponse, MeResponse
 
 log = structlog.get_logger(__name__)
 
-FIVE_HOUR_WINDOW = timedelta(hours=5)
-SEVEN_DAY_WINDOW = timedelta(days=7)
-
 
 @dataclass(frozen=True)
 class AccountUsageSnapshot:
-    """Account-level usage windows from a live /me read; projections use a linear burn rate."""
+    """Account-level usage windows from a live /me read.
+
+    The weekly total is estimated from the locally cached cycle spend divided by the
+    reported utilization percent; the 5-hour window has no local spend data to estimate from.
+    """
 
     email_masked: str
     usage_updated_at: datetime
     five_hour_utilization: Decimal | None
     five_hour_resets_at: datetime | None
-    five_hour_projected: Decimal | None
     seven_day_utilization: Decimal
     seven_day_resets_at: datetime | None
-    seven_day_projected: Decimal | None
+    seven_day_estimated_total: Decimal | None
 
 
 def normalize_email(email: str) -> str:
@@ -317,22 +317,44 @@ class QuotaService:
         me = await self.gateway.me()
         snapshot = me.current_account.usage_snapshot
         five_hour = snapshot.five_hour
-        five_hour_utilization = five_hour.utilization if five_hour is not None else None
-        five_hour_resets_at = five_hour.resets_at if five_hour is not None else None
+        seven_day_used = await self._account_cycle_spend(moment)
         return AccountUsageSnapshot(
             email_masked=me.current_account.email_masked,
             usage_updated_at=me.current_account.usage_updated_at,
-            five_hour_utilization=five_hour_utilization,
-            five_hour_resets_at=five_hour_resets_at,
-            five_hour_projected=(
-                project_window_utilization(five_hour_utilization, five_hour_resets_at, FIVE_HOUR_WINDOW, moment)
-                if five_hour_utilization is not None
-                else None
-            ),
+            five_hour_utilization=five_hour.utilization if five_hour is not None else None,
+            five_hour_resets_at=five_hour.resets_at if five_hour is not None else None,
             seven_day_utilization=snapshot.seven_day.utilization,
             seven_day_resets_at=snapshot.seven_day.resets_at,
-            seven_day_projected=project_window_utilization(snapshot.seven_day.utilization, snapshot.seven_day.resets_at, SEVEN_DAY_WINDOW, moment),
+            seven_day_estimated_total=estimate_window_total(seven_day_used, snapshot.seven_day.utilization),
         )
+
+    async def _account_cycle_spend(self, now: datetime) -> Decimal:
+        """Account-wide current-cycle spend summed from the local cache; zero without a cycle."""
+        async with self.session_factory() as session:
+            cycle = await self.current_cycle(session, now)
+            if cycle is None:
+                return Decimal("0")
+            members = list((await session.scalars(select(UpstreamMember))).all())
+            baselines = {
+                baseline.reclaude_user_id: baseline
+                for baseline in (await session.scalars(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id))).all()
+            }
+            users = {user.reclaude_user_id: user for user in (await session.scalars(select(User))).all()}
+            adjustments: dict[int, list[Decimal]] = {}
+            for adjustment in (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.cycle_id == cycle.id))).all():
+                adjustments.setdefault(adjustment.user_id, []).append(adjustment.amount_usd)
+        total = Decimal("0")
+        for member in members:
+            baseline = baselines.get(member.reclaude_user_id)
+            if baseline is None:
+                continue
+            user = users.get(member.reclaude_user_id)
+            total += cycle_used(
+                member.total_usage_usd,
+                baseline.baseline_total_usd,
+                [amount for amount in adjustments.get(user.id, [])] if user is not None else [],
+            )
+        return total
 
     async def list_task_usage(self, *, scope_mode: str, member_ids: tuple[str, ...], limit_usd: Decimal, now: datetime | None = None) -> dict[str, Any]:
         """Cache-only usage rows for one task's member scope; never calls the upstream API."""

@@ -42,21 +42,16 @@ def baseline_is_timely(captured_at: datetime, cycle_started_at: datetime, max_de
     return captured >= started and captured - started <= max_delay
 
 
-def project_window_utilization(
-    utilization: Decimal | str | int | float,
-    resets_at: datetime | None,
-    window: timedelta,
-    now: datetime,
+def estimate_window_total(
+    used_usd: Decimal | str | int | float | None,
+    utilization: Decimal | str | int | float | None,
 ) -> Decimal | None:
-    """Linear burn-rate projection of utilization at window reset; None when it cannot be known."""
+    """Estimate a window's total dollar budget from consumed dollars and utilization percent."""
 
-    if resets_at is None:
+    if used_usd is None or utilization is None:
         return None
-    moment = ensure_utc(now)
-    started = ensure_utc(resets_at) - window
-    elapsed = moment - started
-    if elapsed <= timedelta(0) or elapsed >= window:
+    used = as_decimal(used_usd)
+    percent = as_decimal(utilization)
+    if used <= ZERO or percent <= ZERO:
         return None
-    window_seconds = Decimal(str(window.total_seconds()))
-    elapsed_seconds = Decimal(str(elapsed.total_seconds()))
-    return as_decimal(utilization) * window_seconds / elapsed_seconds
+    return used * Decimal("100") / percent

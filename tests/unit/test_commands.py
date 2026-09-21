@@ -51,6 +51,8 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
             {"command": "task", "description": "查看限额任务状态"},
             {"command": "starttask", "description": "启动限额任务"},
             {"command": "stoptask", "description": "停止限额任务"},
+            {"command": "startstats", "description": "启动数据统计"},
+            {"command": "stopstats", "description": "停止数据统计"},
             {"command": "addtaskmember", "description": "加入限额任务成员"},
             {"command": "deletetaskmember", "description": "移除限额任务成员"},
             {"command": "settaskquota", "description": "设置任务每用户额度"},

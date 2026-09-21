@@ -14,7 +14,11 @@ health is empty or `banned`, its `account_id` is missing or invalid, or a sessio
 `401`. `/account` is a read-only live inventory (including a banned current account); `/use <account_id>`
 validates one selected record, reconciles it, and persists the selection without enabling writes.
 Use `/starttask <name>` as the operator write switch per task, and `/stoptask <name>` to stop one;
-the shared quota loop and write latch stay open while any task remains `RUNNING`. The legacy
+the write latch stays open while any task remains `RUNNING`, and the shared quota loop keeps
+syncing usage data even after every task has stopped. `/startstats` and `/stopstats` control the
+usage-sync loop itself; the stopped state persists across restarts, and while sync is off,
+enforcement blocks itself on stale member snapshots. `/starttask` while sync is off still marks
+the task `RUNNING` (with a bot warning) but starts no loop until `/startstats`. The legacy
 `/recovery_enable` command retains the stricter single-bound-account discovery flow but does not
 independently start any task. The account record's separate database `id` is never used. No retry
 is attempted after the first `401` until the recovery runbook is completed.
@@ -37,8 +41,9 @@ task re-includes the ID. When only
 one task exists its name may be omitted. Change a task's limit with `/settaskquota <name> <amount>`;
 the new limit reconciles immediately from the local cache. `/taskusers <name>` works in admin
 private chats only and lists every scoped member's current-cycle usage against the task limit. It
-also reads `/api/app/me` live to show the account's 5-hour and 7-day window utilization with a
-linear burn-rate projection; that section degrades to a notice when the upstream read fails, while
+also reads `/api/app/me` live to show the account's 5-hour and 7-day window utilization with reset
+times, plus an estimated 7-day window total (the locally cached cycle spend divided by the reported
+utilization); that section degrades to a notice when the upstream read fails, while
 the member list stays cache-only.
 A member covered by several RUNNING tasks is enforced at the strictest (smallest) limit, because
 upstream revocation is account-level. Group onboarding remains independent of the quota tasks.

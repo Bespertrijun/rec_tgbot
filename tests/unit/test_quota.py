@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from reclaude_bot.domain.quota import baseline_is_timely, cycle_used, is_last_24h, project_window_utilization
+from reclaude_bot.domain.quota import baseline_is_timely, cycle_used, estimate_window_total, is_last_24h
 
 
 def test_cycle_used_uses_decimal_baseline_and_adjustments() -> None:
@@ -22,21 +22,10 @@ def test_baseline_window_is_measured_from_cycle_start() -> None:
     assert not baseline_is_timely(start + timedelta(minutes=1, seconds=1), start, timedelta(minutes=1))
 
 
-def test_project_window_utilization_linear_burn_rate() -> None:
-    reset = datetime(2026, 8, 25, tzinfo=UTC)
-    window = timedelta(days=7)
-    # Half the window elapsed at 6% → projected 12%.
-    assert project_window_utilization(Decimal("6"), reset, window, reset - timedelta(days=3, hours=12)) == Decimal("12")
-    # 5h window: 50% with 2.5h elapsed → projected exactly 100%.
-    five_hour_reset = datetime(2026, 8, 21, 2, 30, tzinfo=UTC)
-    assert project_window_utilization(Decimal("50"), five_hour_reset, timedelta(hours=5), datetime(2026, 8, 21, tzinfo=UTC)) == Decimal("100")
-
-
-def test_project_window_utilization_unknown_when_window_not_active_or_stale() -> None:
-    reset = datetime(2026, 8, 25, tzinfo=UTC)
-    window = timedelta(days=7)
-    assert project_window_utilization(Decimal("6"), None, window, reset) is None
-    # Window has not started yet (future-dated reset) or the snapshot is stale.
-    assert project_window_utilization(Decimal("6"), reset + window, window, reset) is None
-    assert project_window_utilization(Decimal("6"), reset, window, reset) is None
-    assert project_window_utilization(Decimal("6"), reset, window, reset - window) is None
+def test_estimate_window_total_from_spend_and_utilization() -> None:
+    assert estimate_window_total("120", "10") == Decimal("1200")
+    assert estimate_window_total("12.50", 25) == Decimal("50")
+    assert estimate_window_total("0", "10") is None
+    assert estimate_window_total("120", "0") is None
+    assert estimate_window_total(None, "10") is None
+    assert estimate_window_total("120", None) is None

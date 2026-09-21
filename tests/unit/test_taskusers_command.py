@@ -36,6 +36,26 @@ def _usage(entries: list[dict[str, object]]) -> dict[str, object]:
     return {"limit_usd": Decimal("50"), "reset_at": datetime(2026, 8, 25, tzinfo=UTC), "members": entries}
 
 
+def _account() -> SimpleNamespace:
+    return SimpleNamespace(
+        email_masked="ma****@rekwa.com",
+        usage_updated_at=datetime(2026, 8, 18, 5, 0, tzinfo=UTC),
+        five_hour_utilization=Decimal("0"),
+        five_hour_resets_at=None,
+        five_hour_projected=None,
+        seven_day_utilization=Decimal("6"),
+        seven_day_resets_at=datetime(2026, 8, 25, 5, 0, tzinfo=UTC),
+        seven_day_projected=Decimal("12.5"),
+    )
+
+
+_ACCOUNT_LINES = (
+    "账号：ma****@rekwa.com（快照 2026-08-18T05:00:00+00:00）\n"
+    "5h 限额：已用 0.0% | 重置：未激活 | 预估：—\n"
+    "7天限额：已用 6.0% | 重置：2026-08-25T05:00:00+00:00 | 预估：12.5%"
+)
+
+
 def _entry(rid: str, email: str | None, tg: int | None, used: Decimal | None, remaining: Decimal | None, missing: bool = False) -> dict[str, object]:
     return {
         "reclaude_user_id": rid,
@@ -63,17 +83,38 @@ async def test_taskusers_handler_renders_all_member_shapes() -> None:
                     _entry("u-9", None, None, None, None, missing=True),
                 ]
             )
-        )
+        ),
+        get_account_usage=AsyncMock(return_value=_account()),
     )
 
     await handler(message, _command(), task, quota)
 
     message.answer.assert_awaited_once_with(
         "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：4 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
+        f"{_ACCOUNT_LINES}\n"
         "- alice&lt;admin&gt;@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00\n"
         "- bob@example.com | u-2 | 未绑定 | 已用 $3.00 | 剩余 $47.00\n"
         "- carol@example.com | u-3 | TG 303 | ACTIVE | 数据未同步\n"
         "- u-9 | 成员已从上游消失"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskusers_handler_degrades_when_account_usage_unavailable() -> None:
+    handler = _taskusers_handler()
+    message = _message()
+    task = _task(_snapshot())
+    quota = SimpleNamespace(
+        list_task_usage=AsyncMock(return_value=_usage([_entry("u-1", "alice@example.com", 301, Decimal("25"), Decimal("25"))])),
+        get_account_usage=AsyncMock(side_effect=RuntimeError("me unavailable")),
+    )
+
+    await handler(message, _command(), task, quota)
+
+    message.answer.assert_awaited_once_with(
+        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：1 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
+        "账号用量：暂时不可用（上游查询失败）\n"
+        "- alice@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00"
     )
 
 
@@ -134,7 +175,7 @@ async def test_taskusers_handler_splits_long_listing_on_line_boundaries() -> Non
     message = _message()
     task = _task(_snapshot())
     entries = [_entry(f"u-{index}", f"user-{index}-{'x' * 40}@example.com", 1000 + index, Decimal("1"), Decimal("49")) for index in range(80)]
-    quota = SimpleNamespace(list_task_usage=AsyncMock(return_value=_usage(entries)))
+    quota = SimpleNamespace(list_task_usage=AsyncMock(return_value=_usage(entries)), get_account_usage=AsyncMock(return_value=_account()))
 
     await handler(message, _command(), task, quota)
 

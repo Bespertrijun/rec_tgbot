@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -13,12 +14,29 @@ from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import BaselineStatus, CycleStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import as_decimal, baseline_is_timely, cycle_used, ensure_utc, is_last_24h
+from reclaude_bot.domain.quota import as_decimal, baseline_is_timely, cycle_used, ensure_utc, is_last_24h, project_window_utilization
 from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaCycle, RuntimeSetting, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import MembersResponse, MeResponse
 
 log = structlog.get_logger(__name__)
+
+FIVE_HOUR_WINDOW = timedelta(hours=5)
+SEVEN_DAY_WINDOW = timedelta(days=7)
+
+
+@dataclass(frozen=True)
+class AccountUsageSnapshot:
+    """Account-level usage windows from a live /me read; projections use a linear burn rate."""
+
+    email_masked: str
+    usage_updated_at: datetime
+    five_hour_utilization: Decimal | None
+    five_hour_resets_at: datetime | None
+    five_hour_projected: Decimal | None
+    seven_day_utilization: Decimal
+    seven_day_resets_at: datetime | None
+    seven_day_projected: Decimal | None
 
 
 def normalize_email(email: str) -> str:
@@ -292,6 +310,29 @@ class QuotaService:
                 "cycle_status": cycle.status,
                 "sampled_at": member.sampled_at,
             }
+
+    async def get_account_usage(self, *, now: datetime | None = None) -> AccountUsageSnapshot:
+        """Live account-level usage windows; calls the upstream /me endpoint on every invocation."""
+        moment = ensure_utc(now or utcnow())
+        me = await self.gateway.me()
+        snapshot = me.current_account.usage_snapshot
+        five_hour = snapshot.five_hour
+        five_hour_utilization = five_hour.utilization if five_hour is not None else None
+        five_hour_resets_at = five_hour.resets_at if five_hour is not None else None
+        return AccountUsageSnapshot(
+            email_masked=me.current_account.email_masked,
+            usage_updated_at=me.current_account.usage_updated_at,
+            five_hour_utilization=five_hour_utilization,
+            five_hour_resets_at=five_hour_resets_at,
+            five_hour_projected=(
+                project_window_utilization(five_hour_utilization, five_hour_resets_at, FIVE_HOUR_WINDOW, moment)
+                if five_hour_utilization is not None
+                else None
+            ),
+            seven_day_utilization=snapshot.seven_day.utilization,
+            seven_day_resets_at=snapshot.seven_day.resets_at,
+            seven_day_projected=project_window_utilization(snapshot.seven_day.utilization, snapshot.seven_day.resets_at, SEVEN_DAY_WINDOW, moment),
+        )
 
     async def list_task_usage(self, *, scope_mode: str, member_ids: tuple[str, ...], limit_usd: Decimal, now: datetime | None = None) -> dict[str, Any]:
         """Cache-only usage rows for one task's member scope; never calls the upstream API."""

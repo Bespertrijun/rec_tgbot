@@ -36,7 +36,10 @@ other current and future upstream member stays covered; `/addtaskmember <name> <
 task re-includes the ID. When only
 one task exists its name may be omitted. Change a task's limit with `/settaskquota <name> <amount>`;
 the new limit reconciles immediately from the local cache. `/taskusers <name>` works in admin
-private chats only and lists every scoped member's current-cycle usage against the task limit.
+private chats only and lists every scoped member's current-cycle usage against the task limit. It
+also reads `/api/app/me` live to show the account's 5-hour and 7-day window utilization with a
+linear burn-rate projection; that section degrades to a notice when the upstream read fails, while
+the member list stays cache-only.
 A member covered by several RUNNING tasks is enforced at the strictest (smallest) limit, because
 upstream revocation is account-level. Group onboarding remains independent of the quota tasks.
 

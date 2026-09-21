@@ -14,7 +14,7 @@ from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.domain.enums import BaselineStatus, QuotaRevocationStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
-from reclaude_bot.infrastructure.reclaude.models import Member
+from reclaude_bot.infrastructure.reclaude.models import Member, MeResponse
 from reclaude_bot.jobs.usage_poll import poll_once
 
 
@@ -424,3 +424,51 @@ async def test_setquota_without_cache_does_not_read_upstream(app_context):
     await AdminService(factory, quota, actions).set_quota(Decimal("650"), 1)
     assert gateway.members_calls == 0
     assert gateway.me_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_get_account_usage_projects_burn_rate_from_live_me(app_context):
+    factory, gateway, settings = app_context
+    gateway.me_response = MeResponse.model_validate(
+        {
+            "current_account": {
+                "status": "bound",
+                "email_masked": "ma****@rekwa.com",
+                "usage_updated_at": "2026-08-21T00:00:00Z",
+                "usage_snapshot": {
+                    "limits": [{"group": "weekly", "kind": "weekly_all", "scope": None, "percent": "6", "resets_at": "2026-08-25T00:00:00Z", "is_active": True}],
+                    "seven_day": {"utilization": 6, "resets_at": "2026-08-25T00:00:00Z", "used_dollars": None},
+                    "five_hour": {"utilization": 50, "resets_at": "2026-08-21T02:30:00Z", "used_dollars": None},
+                },
+            }
+        }
+    )
+    quota = QuotaService(factory, gateway, settings)
+
+    usage = await quota.get_account_usage(now=datetime(2026, 8, 21, tzinfo=UTC))
+
+    assert gateway.me_calls == 1
+    assert usage.email_masked == "ma****@rekwa.com"
+    assert usage.usage_updated_at == datetime(2026, 8, 21, tzinfo=UTC)
+    # 5h window: started 2026-08-20T21:30, half elapsed at 50% → projected 100%.
+    assert usage.five_hour_utilization == Decimal("50")
+    assert usage.five_hour_resets_at == datetime(2026, 8, 21, 2, 30, tzinfo=UTC)
+    assert usage.five_hour_projected == Decimal("100")
+    # 7day window: started 2026-08-18, 3 of 7 days elapsed at 6% → projected 14%.
+    assert usage.seven_day_utilization == Decimal("6")
+    assert usage.seven_day_projected == Decimal("14")
+
+
+@pytest.mark.asyncio
+async def test_get_account_usage_handles_missing_five_hour(app_context):
+    factory, gateway, settings = app_context
+    quota = QuotaService(factory, gateway, settings)
+
+    usage = await quota.get_account_usage(now=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert usage.five_hour_utilization is None
+    assert usage.five_hour_resets_at is None
+    assert usage.five_hour_projected is None
+    # Fixture seven_day: utilization 10, reset 2026-08-25 → 2 of 7 days elapsed → projected 35%.
+    assert usage.seven_day_utilization == Decimal("10")
+    assert usage.seven_day_projected == Decimal("35")

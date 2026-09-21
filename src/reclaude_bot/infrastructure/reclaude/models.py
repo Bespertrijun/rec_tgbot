@@ -152,9 +152,27 @@ class SevenDay(StrictModel):
         return parse_epoch_or_datetime(value)
 
 
+class UsageWindow(StrictModel):
+    """A rolling usage window such as five_hour; resets_at is null while the window is inactive."""
+
+    utilization: Decimal
+    resets_at: datetime | None = None
+
+    @field_validator("utilization", mode="before")
+    @classmethod
+    def parse_percent(cls, value: Any) -> Decimal:
+        return Decimal(str(value))
+
+    @field_validator("resets_at", mode="before")
+    @classmethod
+    def parse_reset(cls, value: Any) -> datetime | None:
+        return None if value is None else parse_epoch_or_datetime(value)
+
+
 class UsageSnapshot(StrictModel):
     limits: list[WeeklyLimit]
     seven_day: SevenDay
+    five_hour: UsageWindow | None = None
 
 
 class MeResponse(StrictModel):

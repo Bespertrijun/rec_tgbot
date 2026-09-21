@@ -337,6 +337,7 @@ def build_admin_router(settings: Settings) -> Router:
             f"任务：{html.escape(snapshot.name)} | {'RUNNING' if snapshot.enabled else 'STOPPED'} | 范围：{snapshot.scope_mode} | "
             f"成员：{len(entries)} 个 | 任务额度 ${usage['limit_usd']:.2f} | 周期刷新：{_format_datetime(usage['reset_at'])}"
         ]
+        lines.extend(await _account_usage_lines(quota))
         for entry in entries:
             reclaude_user_id = html.escape(str(entry["reclaude_user_id"]))
             if entry["missing_upstream"]:
@@ -532,3 +533,29 @@ def build_admin_router(settings: Settings) -> Router:
 
 def _format_datetime(value: object) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
+
+
+async def _account_usage_lines(quota: QuotaService) -> list[str]:
+    """Live account usage windows for /taskusers; degrades to a notice when /me fails."""
+
+    try:
+        account = await quota.get_account_usage()
+    except Exception:
+        return ["账号用量：暂时不可用（上游查询失败）"]
+    five_hour_reset = _format_datetime(account.five_hour_resets_at) if account.five_hour_resets_at is not None else "未激活"
+    return [
+        f"账号：{html.escape(account.email_masked)}（快照 {_format_datetime(account.usage_updated_at)}）",
+        f"5h 限额：已用 {_format_percent(account.five_hour_utilization)} | 重置：{five_hour_reset} | 预估：{_format_projection(account.five_hour_projected)}",
+        f"7天限额：已用 {_format_percent(account.seven_day_utilization)} | 重置：{_format_datetime(account.seven_day_resets_at)} | 预估：{_format_projection(account.seven_day_projected)}",
+    ]
+
+
+def _format_percent(value: Decimal | None) -> str:
+    return f"{value:.1f}%" if value is not None else "未知"
+
+
+def _format_projection(value: Decimal | None) -> str:
+    if value is None:
+        return "—"
+    warning = "（将触顶）" if value >= Decimal("100") else ""
+    return f"{value:.1f}%{warning}"

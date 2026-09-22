@@ -136,6 +136,28 @@ async def test_verification_payload_binds_user_and_expires(app_context):
 
 
 @pytest.mark.asyncio
+async def test_verification_success_extends_deadline_for_binding(app_context):
+    factory, _, _ = app_context
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    chat_id = -1001
+    user_id = 42
+    await _add_groups(factory, now, chat_id)
+    service = OnboardingService(factory)
+    membership, payload = await _prepare_token(service, chat_id, user_id, now)
+
+    verified_at = now + timedelta(minutes=4)
+    verified = await service.verify_token(user_id, payload, generation=membership.generation, now=verified_at)
+    assert verified is not None
+
+    stored = await service.get_membership(chat_id, user_id)
+    assert stored is not None
+    assert service._persisted_utc(stored.deadline) == verified_at + service.join_deadline
+    # The original join deadline must not trigger removal once verification
+    # has succeeded and the member is completing the binding step.
+    assert await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=1)) is None
+
+
+@pytest.mark.asyncio
 async def test_same_user_tokens_locate_their_respective_groups(app_context):
     factory, _, _ = app_context
     now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
@@ -847,15 +869,19 @@ async def test_timeout_removal_claim_retry_stale_callbacks_and_bind_ordering(app
     membership, payload = await _prepare_token(service, chat_id, user_id, now)
     assert await service.verify_token(user_id, payload, generation=membership.generation, now=now + timedelta(seconds=3)) is not None
 
-    removal_id = await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=1))
+    # Verification grants a fresh binding window, so the original join
+    # deadline no longer arms removal.
+    assert await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=1)) is None
+
+    removal_id = await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=4))
     assert removal_id is not None
     pending = await service.get_membership(chat_id, user_id)
     assert pending is not None
     assert pending.state == GroupMembershipState.REMOVE_PENDING.value
     assert pending.pending_action == OnboardingAction.REMOVE.value
-    assert OnboardingService._persisted_utc(pending.removal_requested_at) == now + timedelta(minutes=5, seconds=1)
-    assert await service.claim_unmute(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=2)) is None
-    assert await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=2)) is None
+    assert OnboardingService._persisted_utc(pending.removal_requested_at) == now + timedelta(minutes=5, seconds=4)
+    assert await service.claim_unmute(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=5)) is None
+    assert await service.claim_removal(chat_id, user_id, membership.generation, now=now + timedelta(minutes=5, seconds=5)) is None
 
     failed = await service.fail_removal(
         chat_id,
@@ -864,7 +890,7 @@ async def test_timeout_removal_claim_retry_stale_callbacks_and_bind_ordering(app
         "removal unavailable",
         attempt_id=removal_id,
         next_retry_at=now + timedelta(minutes=5, seconds=20),
-        now=now + timedelta(minutes=5, seconds=3),
+        now=now + timedelta(minutes=5, seconds=6),
     )
     assert failed is not None
     assert failed.retry_count == 1

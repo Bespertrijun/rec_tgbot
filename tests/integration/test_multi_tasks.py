@@ -9,7 +9,7 @@ from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import ALL, QuotaTaskService
-from reclaude_bot.infrastructure.db.models import AuditLog, ServiceState, UpstreamMember
+from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, ServiceState, UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import Member
 
 
@@ -195,3 +195,33 @@ async def test_list_task_usage_exclude_scope_skips_excluded_members(app_context)
     usage = await quota.list_task_usage(scope_mode="EXCLUDE", member_ids=("u-1",), limit_usd=Decimal("50"), now=now + timedelta(minutes=1))
 
     assert [entry["reclaude_user_id"] for entry in usage["members"]] == ["u-2"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_baseline_does_not_block_enforcement(app_context):
+    factory, gateway, settings = app_context
+    gateway.configure_account_id(4949)
+    quota = QuotaService(factory, gateway, settings)
+    now = datetime(2026, 8, 18, tzinfo=UTC)
+    await quota.sync_cycle_from_me(now=now)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="u-1@example.com", account_id=4949, total_usage_usd=Decimal("0"))
+    # Captured long after the cycle start, so the baseline stays UNKNOWN.
+    await quota.sync_members(now=now + timedelta(minutes=5))
+    async with factory() as session:
+        baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.reclaude_user_id == "u-1"))
+    assert baseline is not None and baseline.status == "UNKNOWN"
+
+    binding = BindingService(factory, gateway)
+    await binding.bind(200, "u-1@example.com")
+    async with factory() as session:
+        async with session.begin():
+            session.add(ServiceState(id=1, write_enabled=False, reason="test", selected_account_id="4949", updated_at=now))
+    actions = QuotaActionService(factory, gateway, quota, settings)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    await task.start("default", 1)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="u-1@example.com", account_id=4949, total_usage_usd=Decimal("800"))
+    await quota.sync_members(now=now + timedelta(minutes=6))
+
+    assert await actions.reconcile_cached(now=now + timedelta(minutes=6)) == 1
+    assert gateway.revoke_calls == ["u-1"]

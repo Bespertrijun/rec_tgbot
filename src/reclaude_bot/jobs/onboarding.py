@@ -355,10 +355,12 @@ class OnboardingWorker:
         )
         if attempt_id is None:
             return False
+        removed_now = False
         try:
             applied = await self.gateway.remove_member(candidate.chat_id, candidate.telegram_user_id)
             if not applied:
                 raise RuntimeError("Telegram did not confirm timeout removal")
+            removed_now = True
         except Exception as exc:
             if _has_marker(exc, _NOT_MEMBER_MARKERS + _ALREADY_APPLIED_MARKERS):
                 applied = True
@@ -374,13 +376,39 @@ class OnboardingWorker:
                 )
                 await self._alert_after_failure(candidate, OnboardingAction.REMOVE.value, row)
                 return row is not None
-        return await self.service.confirm_removal(
+        row = await self.service.confirm_removal(
             candidate.chat_id,
             candidate.telegram_user_id,
             candidate.generation,
             attempt_id=attempt_id,
             now=now,
-        ) is not None
+        )
+        if row is None:
+            return False
+        if removed_now:
+            await self._notify_removed(candidate)
+        return True
+
+    async def _notify_removed(self, candidate: OnboardingCandidate) -> None:
+        """Best-effort group notice after a confirmed timeout removal."""
+        if self.bot is None:
+            return
+        title = await self._group_title(candidate.chat_id)
+        display_name = self._display_names.get(
+            (candidate.chat_id, candidate.telegram_user_id, candidate.generation),
+            "该成员",
+        )
+        mention = f'<a href="tg://user?id={candidate.telegram_user_id}">{html.escape(display_name)}</a>'
+        text = f"{html.escape(title)}：{mention} 未在限期内完成验证，已被移出群组。"
+        try:
+            await self.bot.send_message(candidate.chat_id, text)
+        except Exception as exc:
+            log.warning(
+                "onboarding_removal_notice_failed",
+                chat_id=candidate.chat_id,
+                telegram_user_id=candidate.telegram_user_id,
+                error=str(exc),
+            )
 
     async def _group_title(self, chat_id: int) -> str:
         if self.group_titles is not None:

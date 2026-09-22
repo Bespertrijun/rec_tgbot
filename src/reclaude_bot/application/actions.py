@@ -78,7 +78,10 @@ class QuotaActionService:
                 baseline = await session.scalar(
                     select(CycleBaseline).where(CycleBaseline.reclaude_user_id == user.reclaude_user_id, CycleBaseline.cycle_id == cycle.id).with_for_update()
                 )
-                if baseline is None or baseline.status != "VERIFIED":
+                # Baseline status is advisory: enforcement proceeds with whatever
+                # baseline exists, since a missing-at-cycle-start capture must not
+                # silently disable quota enforcement for the whole cycle.
+                if baseline is None:
                     return None
                 adjustments = (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.user_id == user.id, QuotaAdjustment.cycle_id == cycle.id))).all()
                 used = cycle_used(member.total_usage_usd, baseline.baseline_total_usd, [item.amount_usd for item in adjustments])

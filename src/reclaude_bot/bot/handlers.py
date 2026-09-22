@@ -47,7 +47,7 @@ def build_router(settings: Settings) -> Router:
             except DomainError:
                 membership = None
             if membership is None:
-                await message.answer("验证链接无效或已过期，请从群组重新获取验证消息。")
+                await message.answer("验证链接无效或已过期。请重新加入群组获取新的验证消息；若你已完成绑定，重新入群后权限会自动恢复。")
                 return
             if await onboarding.is_bound_active(message.from_user.id):
                 await onboarding.queue_unmute_for_user(message.from_user.id)

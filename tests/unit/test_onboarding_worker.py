@@ -88,6 +88,24 @@ async def test_timeout_uses_unban_without_ban(worker_context):
 
 
 @pytest.mark.asyncio
+async def test_timeout_removal_sends_group_notice(worker_context):
+    factory, now = worker_context
+    bot = AsyncMock()
+    gateway = FakeGateway(bot)
+    service = OnboardingService(factory)
+    worker = OnboardingWorker(service, gateway, bot)
+    await service.begin_join(-1001, 42, real_join=True, joined_at=now - timedelta(minutes=5))
+
+    assert await worker.run_once(now=now)
+    gateway.remove_member.assert_awaited_once_with(-1001, 42)
+    bot.send_message.assert_awaited_once()
+    call = bot.send_message.await_args
+    assert call.args[0] == -1001
+    assert 'tg://user?id=42' in call.args[1]
+    assert "已被移出群组" in call.args[1]
+
+
+@pytest.mark.asyncio
 async def test_chat_member_router_uses_worker_for_real_transitions(worker_context):
     factory, now = worker_context
     worker = AsyncMock()

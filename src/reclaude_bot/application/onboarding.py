@@ -1009,6 +1009,10 @@ class OnboardingService:
                     return None
                 row.verification_token_hash = None
                 row.verification_started_at = instant
+                # Verification moves the member into the binding stage: grant a
+                # fresh window so a slow /bind is not cut off by the original
+                # join deadline.
+                row.deadline = instant + self.join_deadline
                 if row.pending_action == OnboardingAction.VERIFICATION_NOTIFICATION.value:
                     row.pending_action = None
                     row.retry_count = 0

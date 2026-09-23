@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -15,6 +15,7 @@ from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.application.updater import UpdateService, cleanup_stale_updating_container, consume_restart_notification
+from reclaude_bot.bot.autodelete import AutoDeleteBot
 from reclaude_bot.bot.commands import register_command_menus
 from reclaude_bot.bot.groups import TelegramGroupGateway, build_group_router
 from reclaude_bot.bot.handlers import build_admin_router, build_router
@@ -34,7 +35,7 @@ async def run() -> None:
     session_factory = create_session_factory(settings)
     gate = RecoveryGate(session_factory)
     startup_state = await gate.ensure_disabled()
-    bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = AutoDeleteBot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     group_gateway = TelegramGroupGateway(bot)
     groups = GroupService(session_factory, group_gateway, settings.telegram_admin_ids)
     onboarding = OnboardingService(session_factory)
@@ -47,6 +48,9 @@ async def run() -> None:
     async def operational_alert(message: str) -> None:
         for admin_id in settings.telegram_admin_ids:
             await bot.send_message(admin_id, f"高优先级告警：{message}")
+
+    async def user_notify(telegram_id: int, text: str) -> None:
+        await bot.send_message(telegram_id, text)
 
     gateway = ReclaudeClient(
         settings.reclaude_base_url,
@@ -61,7 +65,7 @@ async def run() -> None:
         auth_alert_callback=auth_alert,
     )
     quota = QuotaService(session_factory, gateway, settings)
-    actions = QuotaActionService(session_factory, gateway, quota, settings, gate=gate, alert_callback=operational_alert)
+    actions = QuotaActionService(session_factory, gateway, quota, settings, gate=gate, alert_callback=operational_alert, user_notify_callback=user_notify)
     onboarding_worker = OnboardingWorker(
         onboarding,
         group_gateway,

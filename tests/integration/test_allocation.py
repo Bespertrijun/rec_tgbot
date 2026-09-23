@@ -10,7 +10,7 @@ from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.domain.enums import QuotaRevocationStatus
-from reclaude_bot.infrastructure.db.models import AuditLog, QuotaRevocation, ServiceState
+from reclaude_bot.infrastructure.db.models import AuditLog, QuotaRevocation, ServiceState, UsageNotification
 from reclaude_bot.infrastructure.reclaude.models import Member
 from reclaude_bot.jobs.usage_poll import poll_once
 
@@ -156,6 +156,97 @@ async def test_fresh_member_snapshot_executes_cached_action_immediately(app_cont
     assert gateway.members_calls == members_calls
     assert gateway.me_calls == me_calls
     assert gateway.revoke_calls == ["u-1"]
+
+
+@pytest.mark.asyncio
+async def test_quota_revoke_notifies_user_privately(app_context, fixed_clock):
+    factory, gateway, settings, quota, _actions, task, user, now = await seed(app_context)
+    notices: list[tuple[int, str]] = []
+
+    async def notify(telegram_id: int, text: str) -> None:
+        notices.append((telegram_id, text))
+
+    actions = QuotaActionService(factory, gateway, quota, settings, user_notify_callback=notify)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
+    await poll_once(quota, actions, now=now + timedelta(minutes=1))
+    await poll_once(quota, actions, now=now + timedelta(minutes=2))
+    assert gateway.revoke_calls == ["u-1"]
+    assert len(notices) == 1
+    telegram_id, text = notices[0]
+    assert telegram_id == 200
+    assert "额度已用完" in text
+
+    await quota.sync_members(now=now + timedelta(minutes=2))
+    fixed_clock[0] = now + timedelta(minutes=3)
+    await AdminService(factory, quota, actions, task).set_task_quota("default", Decimal("900"), 1)
+    assert gateway.assign_calls == ["u-1"]
+    # 800/900 = 88.9%: the restore first triggers the pending 80% reminder.
+    assert len(notices) == 3
+    assert "80%" in notices[1][1]
+    restore_telegram_id, restore_text = notices[2]
+    assert restore_telegram_id == 200
+    assert "额度已恢复" in restore_text
+
+
+@pytest.mark.asyncio
+async def test_user_notice_failure_does_not_block_revoke(app_context):
+    factory, gateway, settings, quota, _actions, _task, _user, now = await seed(app_context)
+
+    async def failing_notify(telegram_id: int, text: str) -> None:
+        raise RuntimeError("user blocked the bot")
+
+    actions = QuotaActionService(factory, gateway, quota, settings, user_notify_callback=failing_notify)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
+    await poll_once(quota, actions, now=now + timedelta(minutes=1))
+    assert gateway.revoke_calls == ["u-1"]
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_notices_sent_once_per_cycle(app_context):
+    factory, gateway, settings, quota, _actions, _task, _user, now = await seed(app_context)
+    notices: list[tuple[int, str]] = []
+
+    async def notify(telegram_id: int, text: str) -> None:
+        notices.append((telegram_id, text))
+
+    actions = QuotaActionService(factory, gateway, quota, settings, user_notify_callback=notify)
+    # Default limit is $700: 50% = $350, 80% = $560.
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="400")
+    await poll_once(quota, actions, now=now + timedelta(minutes=1))
+    assert len(notices) == 1
+    assert notices[0][0] == 200
+    assert "50%" in notices[0][1]
+
+    await poll_once(quota, actions, now=now + timedelta(minutes=2))
+    assert len(notices) == 1
+
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="600")
+    await poll_once(quota, actions, now=now + timedelta(minutes=3))
+    assert len(notices) == 2
+    assert "80%" in notices[1][1]
+    assert "100%" in notices[1][1]
+
+    # 100%+ is covered by the revoke notice, with no extra threshold message.
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
+    await poll_once(quota, actions, now=now + timedelta(minutes=4))
+    assert gateway.revoke_calls == ["u-1"]
+    assert len(notices) == 3
+    assert "额度已用完" in notices[2][1]
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_notice_failure_does_not_block_tick(app_context):
+    factory, gateway, settings, quota, _actions, _task, _user, now = await seed(app_context)
+
+    async def failing_notify(telegram_id: int, text: str) -> None:
+        raise RuntimeError("user blocked the bot")
+
+    actions = QuotaActionService(factory, gateway, quota, settings, user_notify_callback=failing_notify)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="400")
+    await poll_once(quota, actions, now=now + timedelta(minutes=1))
+    async with factory() as session:
+        rows = list((await session.scalars(select(UsageNotification))).all())
+    assert [row.threshold_percent for row in rows] == [50]
 
 
 @pytest.mark.asyncio

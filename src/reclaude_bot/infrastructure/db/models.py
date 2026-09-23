@@ -124,6 +124,19 @@ class QuotaRevocation(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
 
 
+class UsageNotification(Base):
+    __tablename__ = "usage_notifications"
+    __table_args__ = (UniqueConstraint("user_id", "cycle_id", "threshold_percent", name="uq_usage_notifications_user_cycle_threshold"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("quota_cycles.id"), nullable=False)
+    threshold_percent: Mapped[int] = mapped_column(Integer, nullable=False)
+    used_usd: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class RuntimeSetting(Base):
     __tablename__ = "runtime_settings"
 

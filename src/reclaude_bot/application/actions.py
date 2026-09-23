@@ -15,10 +15,22 @@ from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import CycleStatus, QuotaRevocationStatus, TaskStatus, UserStatus
 from reclaude_bot.domain.quota import as_decimal, cycle_used, ensure_utc, is_last_24h
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaRevocation, QuotaTask, QuotaTaskMember, UpstreamMember, User
+from reclaude_bot.infrastructure.db.models import (
+    CycleBaseline,
+    QuotaAdjustment,
+    QuotaCycle,
+    QuotaRevocation,
+    QuotaTask,
+    QuotaTaskMember,
+    UpstreamMember,
+    UsageNotification,
+    User,
+)
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 
 log = structlog.get_logger(__name__)
+
+USAGE_NOTICE_THRESHOLDS = (50, 80)
 
 
 class QuotaActionService:
@@ -30,6 +42,7 @@ class QuotaActionService:
         settings: Settings,
         gate: RecoveryGate | None = None,
         alert_callback: Callable[[str], Awaitable[None]] | None = None,
+        user_notify_callback: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.gateway = gateway
@@ -37,6 +50,7 @@ class QuotaActionService:
         self.settings = settings
         self.gate = gate
         self.alert_callback = alert_callback
+        self.user_notify_callback = user_notify_callback
         self._lock = asyncio.Lock()
 
     async def _writes_allowed(self) -> bool:
@@ -152,6 +166,51 @@ class QuotaActionService:
                     return "restore", user.reclaude_user_id, cycle.id, str(limit)
                 return None
 
+    async def _record_usage_notice(self, user_id: int, *, effective_limit: Decimal, now: datetime) -> tuple[int, int, Decimal, Decimal, datetime] | None:
+        """Persist newly crossed usage thresholds; return the highest one to notify."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                cycle = await self.quota.current_cycle(session, now)
+                if cycle is None or cycle.status != CycleStatus.VERIFIED.value:
+                    return None
+                user = await session.get(User, user_id, with_for_update=True)
+                if user is None or user.binding_status != "BOUND" or user.status != UserStatus.ACTIVE.value:
+                    return None
+                member = await session.scalar(select(UpstreamMember).where(UpstreamMember.reclaude_user_id == user.reclaude_user_id).with_for_update())
+                if member is None or not self._member_snapshot_is_fresh(member.sampled_at, now):
+                    return None
+                baseline = await session.scalar(
+                    select(CycleBaseline).where(CycleBaseline.reclaude_user_id == user.reclaude_user_id, CycleBaseline.cycle_id == cycle.id).with_for_update()
+                )
+                if baseline is None:
+                    return None
+                adjustments = (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.user_id == user.id, QuotaAdjustment.cycle_id == cycle.id))).all()
+                used = cycle_used(member.total_usage_usd, baseline.baseline_total_usd, [item.amount_usd for item in adjustments])
+                limit = effective_limit
+                if limit <= 0 or used >= limit:
+                    # 100%+ is covered by the revoke notice.
+                    return None
+                already = set(
+                    await session.scalars(
+                        select(UsageNotification.threshold_percent).where(UsageNotification.user_id == user.id, UsageNotification.cycle_id == cycle.id)
+                    )
+                )
+                crossed = [threshold for threshold in USAGE_NOTICE_THRESHOLDS if threshold not in already and used * 100 >= limit * threshold]
+                for threshold in crossed:
+                    session.add(
+                        UsageNotification(
+                            user_id=user.id,
+                            cycle_id=cycle.id,
+                            threshold_percent=threshold,
+                            used_usd=used,
+                            limit_usd=limit,
+                            created_at=now,
+                        )
+                    )
+                if not crossed:
+                    return None
+                return user.telegram_user_id, max(crossed), used, limit, cycle.reset_at
+
     async def _execute(self, action: tuple[str, str, int, str], *, now: datetime) -> None:
         kind, reclaude_user_id, cycle_id, limit_usd = action
         if not await self._writes_allowed():
@@ -197,6 +256,40 @@ class QuotaActionService:
                             parameters_summary={"cycle_id": cycle_id, "error": str(exc), "limit_usd": limit_usd},
                         )
             await self._notify(f"{kind} {reclaude_user_id} 结果待下一次成员同步确认")
+            return
+        await self._notify_user(kind, reclaude_user_id, cycle_id, limit_usd)
+
+    async def _notify_user(self, kind: str, reclaude_user_id: str, cycle_id: int, limit_usd: str) -> None:
+        """Best-effort private notice to the user after a successful quota action."""
+        if self.user_notify_callback is None:
+            return
+        try:
+            async with self.session_factory() as session:
+                user = await session.scalar(select(User).where(User.reclaude_user_id == reclaude_user_id))
+                cycle = await session.get(QuotaCycle, cycle_id)
+            if user is None:
+                return
+            if kind == "revoke":
+                reset_at = cycle.reset_at.isoformat() if cycle is not None else "unknown"
+                text = f"本周期额度已用完（限额 ${limit_usd}），{reset_at} 刷新后会自动恢复使用。"
+            else:
+                text = f"本周期额度已恢复（限额 ${limit_usd}），可以继续使用了。"
+            await self.user_notify_callback(user.telegram_user_id, text)
+        except Exception as exc:
+            log.warning("quota_action_user_notice_failed", action=kind, reclaude_user_id=reclaude_user_id, error=str(exc))
+
+    async def _send_usage_notice(self, notice: tuple[int, int, Decimal, Decimal, datetime]) -> None:
+        """Best-effort private usage-threshold reminder."""
+        if self.user_notify_callback is None:
+            return
+        telegram_user_id, threshold, used, limit, reset_at = notice
+        text = f"本周期额度已使用 {threshold}%（已用 ${used:.2f} / 限额 ${limit:.2f}），{reset_at.isoformat()} 刷新。"
+        if threshold >= 80:
+            text += "达到 100% 后将暂停使用。"
+        try:
+            await self.user_notify_callback(telegram_user_id, text)
+        except Exception as exc:
+            log.warning("usage_threshold_notice_failed", telegram_user_id=telegram_user_id, threshold=threshold, error=str(exc))
 
     async def _running_coverage(self, session: AsyncSession) -> dict[str, Decimal]:
         """reclaude_user_id → strictest (smallest) limit across RUNNING tasks covering it."""
@@ -250,6 +343,9 @@ class QuotaActionService:
                 targets = [(user.id, coverage[user.reclaude_user_id]) for user in rows]
             actions = 0
             for user_id, limit in targets:
+                notice = await self._record_usage_notice(user_id, effective_limit=limit, now=moment)
+                if notice is not None:
+                    await self._send_usage_notice(notice)
                 action = await self._prepare_action(user_id, effective_limit=limit, now=moment)
                 if action is None:
                     continue

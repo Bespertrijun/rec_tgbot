@@ -188,6 +188,31 @@ def test_postgresql_append_only_ddl_is_explicit_and_reversible() -> None:
     assert "DROP FUNCTION IF EXISTS audit_logs_append_only_guard()" in source
 
 
+def test_usage_notification_schema_is_reversible(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "usage-notifications.db"
+    config = _alembic_config(database)
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        database_inspector = inspect(engine)
+        assert database_inspector.has_table("usage_notifications")
+        columns = {column["name"] for column in database_inspector.get_columns("usage_notifications")}
+        assert {"user_id", "cycle_id", "threshold_percent", "used_usd", "limit_usd", "created_at"} <= columns
+        constraints = {constraint["name"] for constraint in database_inspector.get_unique_constraints("usage_notifications")}
+        assert "uq_usage_notifications_user_cycle_threshold" in constraints
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0007_usage_sync_switch")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        assert not inspect(engine).has_table("usage_notifications")
+    finally:
+        engine.dispose()
+
+
 def test_sqlite_group_onboarding_schema_is_reversible(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     database = tmp_path / "group-onboarding.db"

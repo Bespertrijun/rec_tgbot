@@ -87,3 +87,52 @@ async def test_delete_failure_is_swallowed(harness, monkeypatch: pytest.MonkeyPa
 def test_delay_must_be_positive() -> None:
     with pytest.raises(ValueError):
         AutoDeleteBot(_TOKEN, auto_delete_delay=0)
+
+
+@pytest.mark.asyncio
+async def test_private_message_is_mirrored_to_admins(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(id=7, type=ChatType.PRIVATE, first_name="User")
+    send_message = AsyncMock(return_value=_sent_message(chat))
+    monkeypatch.setattr(Bot, "send_message", send_message)
+    bot = AutoDeleteBot(_TOKEN, auto_delete_delay=0.01, admin_ids=(1, 2))
+    try:
+        await bot.send_message(chat.id, "验证成功")
+
+        assert send_message.await_count == 3
+        mirror_calls = send_message.await_args_list[1:]
+        assert [call.args[0] for call in mirror_calls] == [1, 2]
+        for call in mirror_calls:
+            assert "私聊镜像" in call.args[1]
+            assert "User（7）" in call.args[1]
+            assert "验证成功" in call.args[1]
+    finally:
+        await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_message_to_admin_is_not_mirrored(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(id=1, type=ChatType.PRIVATE, first_name="Admin")
+    send_message = AsyncMock(return_value=_sent_message(chat))
+    monkeypatch.setattr(Bot, "send_message", send_message)
+    bot = AutoDeleteBot(_TOKEN, auto_delete_delay=0.01, admin_ids=(1, 2))
+    try:
+        await bot.send_message(chat.id, "管理员通知")
+
+        send_message.assert_awaited_once_with(chat.id, "管理员通知")
+    finally:
+        await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_mirror_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(id=7, type=ChatType.PRIVATE, first_name="User")
+    send_message = AsyncMock(side_effect=[_sent_message(chat), RuntimeError("admin blocked the bot"), _sent_message(chat)])
+    monkeypatch.setattr(Bot, "send_message", send_message)
+    bot = AutoDeleteBot(_TOKEN, auto_delete_delay=0.01, admin_ids=(1, 2))
+    try:
+        message = await bot.send_message(chat.id, "验证成功")
+
+        assert message.chat.id == chat.id
+        assert send_message.await_count == 3
+    finally:
+        await bot.session.close()

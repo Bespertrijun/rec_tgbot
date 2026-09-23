@@ -35,7 +35,7 @@ async def run() -> None:
     session_factory = create_session_factory(settings)
     gate = RecoveryGate(session_factory)
     startup_state = await gate.ensure_disabled()
-    bot = AutoDeleteBot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = AutoDeleteBot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML), admin_ids=settings.telegram_admin_ids)
     group_gateway = TelegramGroupGateway(bot)
     groups = GroupService(session_factory, group_gateway, settings.telegram_admin_ids)
     onboarding = OnboardingService(session_factory)

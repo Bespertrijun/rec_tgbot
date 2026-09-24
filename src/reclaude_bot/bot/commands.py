@@ -4,7 +4,10 @@ from collections.abc import Iterable
 
 import structlog
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeChatMember, BotCommandScopeDefault
+
+from reclaude_bot.application.groups import GroupService
+from reclaude_bot.domain.enums import ManagedGroupStatus
 
 log = structlog.get_logger(__name__)
 
@@ -70,3 +73,47 @@ async def register_command_menus(bot: Bot, admin_ids: Iterable[int]) -> None:
                 admin_id=admin_id,
                 error=str(exc),
             )
+
+
+async def register_group_admin_menus(bot: Bot, chat_id: int, admin_ids: Iterable[int]) -> None:
+    """Give each admin the full command menu inside one managed group."""
+    for admin_id in admin_ids:
+        try:
+            await bot.set_my_commands(
+                admin_commands(),
+                scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=admin_id),
+            )
+        except Exception as exc:
+            log.warning(
+                "telegram_command_menu_registration_failed",
+                scope="chat_member",
+                chat_id=chat_id,
+                admin_id=admin_id,
+                error=str(exc),
+            )
+
+
+async def clear_group_admin_menus(bot: Bot, chat_id: int, admin_ids: Iterable[int]) -> None:
+    """Remove per-admin menus for a group; affected admins fall back to the public menu."""
+    for admin_id in admin_ids:
+        try:
+            await bot.delete_my_commands(scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=admin_id))
+        except Exception as exc:
+            log.warning(
+                "telegram_command_menu_cleanup_failed",
+                scope="chat_member",
+                chat_id=chat_id,
+                admin_id=admin_id,
+                error=str(exc),
+            )
+
+
+async def restore_group_admin_menus(bot: Bot, groups: GroupService, admin_ids: Iterable[int]) -> None:
+    """Re-register per-admin group menus for every ACTIVE managed group on startup."""
+    try:
+        rows = await groups.list_groups(ManagedGroupStatus.ACTIVE)
+    except Exception as exc:
+        log.warning("telegram_command_menu_restore_failed", error=str(exc))
+        return
+    for row in rows:
+        await register_group_admin_menus(bot, row.chat_id, admin_ids)

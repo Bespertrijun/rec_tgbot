@@ -12,6 +12,7 @@ from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.methods import GetChat, GetChatMember
 from aiogram.types import (
+    BotCommandScopeChatMember,
     CallbackQuery,
     Chat,
     ChatMemberAdministrator,
@@ -224,9 +225,15 @@ async def test_group_callback_requires_private_chat_and_strict_data() -> None:
     row = SimpleNamespace(chat_id=-1001, title="Managed", status=ManagedGroupStatus.ACTIVE.value)
     groups = SimpleNamespace(approve=AsyncMock(return_value=row))
 
-    await handler(callback=callback, groups=groups)
+    bot = AsyncMock()
+    await handler(callback=callback, groups=groups, bot=bot)
     groups.approve.assert_awaited_once_with(-1001, 7)
     callback_answer.assert_awaited_once()
+    menu_scopes = [call.kwargs["scope"] for call in bot.set_my_commands.await_args_list]
+    assert len(menu_scopes) == 1
+    assert isinstance(menu_scopes[0], BotCommandScopeChatMember)
+    assert menu_scopes[0].chat_id == -1001
+    assert menu_scopes[0].user_id == 7
 
     group_message = message(ChatType.SUPERGROUP)
     group_callback = CallbackQuery(
@@ -238,7 +245,7 @@ async def test_group_callback_requires_private_chat_and_strict_data() -> None:
     )
     group_callback_answer = AsyncMock()
     object.__setattr__(group_callback, "answer", group_callback_answer)
-    await handler(callback=group_callback, groups=groups)
+    await handler(callback=group_callback, groups=groups, bot=AsyncMock())
     assert groups.approve.await_count == 1
     group_callback_answer.assert_awaited_once()
 
@@ -251,7 +258,7 @@ async def test_group_callback_requires_private_chat_and_strict_data() -> None:
     )
     invalid_callback_answer = AsyncMock()
     object.__setattr__(invalid_callback, "answer", invalid_callback_answer)
-    await handler(callback=invalid_callback, groups=groups)
+    await handler(callback=invalid_callback, groups=groups, bot=AsyncMock())
     invalid_callback_answer.assert_awaited_once()
 
 

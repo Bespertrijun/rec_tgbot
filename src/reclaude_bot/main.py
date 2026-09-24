@@ -16,7 +16,7 @@ from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.application.updater import UpdateService, cleanup_stale_updating_container, consume_restart_notification
 from reclaude_bot.bot.autodelete import AutoDeleteBot
-from reclaude_bot.bot.commands import register_command_menus
+from reclaude_bot.bot.commands import register_command_menus, restore_group_admin_menus
 from reclaude_bot.bot.groups import TelegramGroupGateway, build_group_router
 from reclaude_bot.bot.handlers import build_admin_router, build_router
 from reclaude_bot.config import get_settings
@@ -98,6 +98,7 @@ async def run() -> None:
     dp.include_router(build_group_router(settings))
     try:
         await register_command_menus(bot, settings.telegram_admin_ids)
+        await restore_group_admin_menus(bot, groups, settings.telegram_admin_ids)
         await cleanup_stale_updating_container()
         asyncio.create_task(consume_restart_notification(bot, settings))
         await jobs.start(start_quota=False)

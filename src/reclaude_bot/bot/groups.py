@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, ChatPermissions, Inl
 
 from reclaude_bot.application.groups import GroupService, GroupSnapshot
 from reclaude_bot.application.onboarding import OnboardingService
+from reclaude_bot.bot.commands import clear_group_admin_menus, register_group_admin_menus
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import ManagedGroupStatus
 from reclaude_bot.domain.errors import GroupError
@@ -239,6 +240,7 @@ def build_group_router(settings: Settings | Iterable[int]) -> Router:
             await _notify_owners(bot, owner_ids, f"发现待审批群组：\n{_format_group(row)}", row)
         elif row.status == ManagedGroupStatus.DISABLED.value and before_status == ManagedGroupStatus.ACTIVE.value:
             await _notify_owners(bot, owner_ids, f"群组权限已失效，群组已自动停用：\n{_format_group(row)}", row)
+            await clear_group_admin_menus(bot, row.chat_id, owner_ids)
 
     @router.chat_member()
     async def chat_member(
@@ -307,7 +309,7 @@ def build_group_router(settings: Settings | Iterable[int]) -> Router:
                 log.warning("group_member_fallback_onboarding_failed", chat_id=message.chat.id, user_id=target.id, error=type(exc).__name__)
 
     @router.callback_query(F.data.startswith(f"{_CALLBACK_PREFIX}:"))
-    async def group_callback(callback: CallbackQuery, groups: GroupService) -> None:
+    async def group_callback(callback: CallbackQuery, groups: GroupService, bot: Bot) -> None:
         if callback.message is None or callback.message.chat.type != ChatType.PRIVATE:
             await callback.answer("请在 Bot 私聊中操作。", show_alert=True)
             return
@@ -345,6 +347,10 @@ def build_group_router(settings: Settings | Iterable[int]) -> Router:
             return
 
         await callback.answer("操作完成。")
+        if parts[1] in {"approve", "enable"}:
+            await register_group_admin_menus(bot, chat_id, owner_ids)
+        elif parts[1] in {"reject", "disable"}:
+            await clear_group_admin_menus(bot, chat_id, owner_ids)
         if isinstance(callback.message, Message):
             try:
                 await callback.message.edit_text(_format_group(row), reply_markup=_keyboard(row))

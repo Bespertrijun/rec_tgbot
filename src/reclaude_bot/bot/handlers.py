@@ -441,7 +441,7 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             name, value = await admin.set_task_quota(name_arg, amount, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"任务 {html.escape(name)} 每用户额度已设置为 ${value:.2f}")
+            await message.answer(f"任务 {html.escape(name)} 每用户额度已设置为 ${value:.2f}", skip_auto_delete=True)
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
 

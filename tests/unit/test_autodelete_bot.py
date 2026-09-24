@@ -53,6 +53,20 @@ async def test_private_message_is_not_deleted(harness, monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_skip_auto_delete_keeps_group_message(harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(id=-1001, type=ChatType.SUPERGROUP)
+    send_message = AsyncMock(return_value=_sent_message(chat))
+    monkeypatch.setattr(Bot, "send_message", send_message)
+
+    await harness.bot.send_message(chat.id, "额度公告", skip_auto_delete=True)
+    await asyncio.sleep(0.05)
+
+    harness.delete_message.assert_not_awaited()
+    # The opt-out kwarg must be consumed by the wrapper, not passed to the Telegram API.
+    send_message.assert_awaited_once_with(chat.id, "额度公告")
+
+
+@pytest.mark.asyncio
 async def test_button_message_uses_longer_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     chat = Chat(id=-1001, type=ChatType.SUPERGROUP)
     markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="验证并绑定", url="https://t.me/x")]])

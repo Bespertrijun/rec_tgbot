@@ -42,7 +42,10 @@ async def _delete_later(bot: Bot, chat_id: int, message_id: int, delay: float) -
 class AutoDeleteBot(Bot):
     """Bot that recalls its own group messages (plain ones after `auto_delete_delay`,
     messages carrying an inline keyboard after `button_delete_delay`) and mirrors
-    private messages sent to non-admin users to `admin_ids`."""
+    private messages sent to non-admin users to `admin_ids`.
+
+    Pass ``skip_auto_delete=True`` to `send_message` (or `Message.answer`) to keep
+    a group message permanently, e.g. for admin announcements."""
 
     def __init__(
         self,
@@ -62,13 +65,15 @@ class AutoDeleteBot(Bot):
         self.admin_ids = tuple(admin_ids)
 
     async def send_message(self, chat_id: int | str, text: str, *args: Any, **kwargs: Any) -> Message:
+        skip_auto_delete = bool(kwargs.pop("skip_auto_delete", False))
         message = await super().send_message(chat_id, text, *args, **kwargs)
         chat = message.chat
         if chat is None:
             return message
         if chat.type in _GROUP_TYPES:
-            delay = self.button_delete_delay if message.reply_markup is not None else self.auto_delete_delay
-            schedule_auto_delete(self, chat.id, message.message_id, delay=delay)
+            if not skip_auto_delete:
+                delay = self.button_delete_delay if message.reply_markup is not None else self.auto_delete_delay
+                schedule_auto_delete(self, chat.id, message.message_id, delay=delay)
         elif chat.type == ChatType.PRIVATE and chat.id not in self.admin_ids:
             await self._mirror_to_admins(chat, text)
         return message

@@ -120,7 +120,7 @@ async def test_restore_group_admin_menus_registers_each_active_group() -> None:
     bot = AsyncMock()
     groups = SimpleNamespace(list_groups=AsyncMock(return_value=[SimpleNamespace(chat_id=-1001), SimpleNamespace(chat_id=-1002)]))
 
-    await restore_group_admin_menus(bot, groups, [101])
+    await restore_group_admin_menus(bot, groups, [101])  # type: ignore[arg-type]
 
     groups.list_groups.assert_awaited_once_with(ManagedGroupStatus.ACTIVE)
     scopes = [call.kwargs["scope"] for call in bot.set_my_commands.await_args_list]
@@ -133,6 +133,6 @@ async def test_restore_group_admin_menus_swallows_listing_failure() -> None:
     bot = AsyncMock()
     groups = SimpleNamespace(list_groups=AsyncMock(side_effect=RuntimeError("db down")))
 
-    await restore_group_admin_menus(bot, groups, [101])
+    await restore_group_admin_menus(bot, groups, [101])  # type: ignore[arg-type]
 
     bot.set_my_commands.assert_not_awaited()

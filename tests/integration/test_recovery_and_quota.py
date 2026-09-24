@@ -512,8 +512,8 @@ def _set_weekly_reset(gateway, reset: datetime) -> None:
                 update={
                     "usage_snapshot": snapshot.model_copy(
                         update={
-                            "limits": [WeeklyLimit(group="weekly", kind="weekly_all", scope=None, percent="10", resets_at=reset, is_active=True)],
-                            "seven_day": SevenDay(utilization="10", resets_at=reset),
+                            "limits": [WeeklyLimit(group="weekly", kind="weekly_all", scope=None, percent=Decimal("10"), resets_at=reset, is_active=True)],
+                            "seven_day": SevenDay(utilization=Decimal("10"), resets_at=reset),
                         }
                     )
                 }

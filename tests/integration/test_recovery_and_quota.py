@@ -11,10 +11,10 @@ from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.application.task import QuotaTaskService
-from reclaude_bot.domain.enums import BaselineStatus, QuotaRevocationStatus
+from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, QuotaRevocationStatus, TaskStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember
-from reclaude_bot.infrastructure.reclaude.models import Member, MeResponse
+from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, QuotaTask, ServiceState, UpstreamMember, User
+from reclaude_bot.infrastructure.reclaude.models import Member, MeResponse, SevenDay, WeeklyLimit
 from reclaude_bot.jobs.usage_poll import poll_once
 
 
@@ -475,3 +475,163 @@ async def test_get_account_usage_reads_five_hour_window(app_context):
     assert usage.five_hour_resets_at == datetime(2026, 8, 21, 2, 30, tzinfo=UTC)
     # No local cycle data → no weekly estimate.
     assert usage.seven_day_estimated_total is None
+
+
+async def _seed_revoked_user(app_context):
+    """Drive bound member u-1 into a confirmed REVOKED state under a RUNNING task."""
+    factory, gateway, settings = app_context
+    gateway.configure_account_id(4949)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd=Decimal("0"))
+    quota = QuotaService(factory, gateway, settings)
+    now = datetime(2026, 8, 18, tzinfo=UTC)
+    await quota.sync_cycle_from_me(now=now)
+    await quota.sync_members(now=now)
+    user = await BindingService(factory, gateway).bind(200, "one@example.com")
+    actions = QuotaActionService(factory, gateway, quota, settings)
+    task = QuotaTaskService(factory, gateway)
+    await task.create_task("default", None, 1)
+    async with factory() as session:
+        async with session.begin():
+            session.add(ServiceState(id=1, write_enabled=False, reason="test", selected_account_id="4949", updated_at=now))
+    await task.start("default", 1)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd=Decimal("800"))
+    await poll_once(quota, actions, now=now + timedelta(minutes=1))
+    await poll_once(quota, actions, now=now + timedelta(minutes=2))
+    return factory, gateway, settings, quota, actions, task, user, now
+
+
+def _add_second_account(gateway) -> None:
+    gateway.account_rows.append({"id": 7023, "account_email": "new@example.com", "account_id": 8123, "health": "healthy", "lifecycle": "bound", "org_id": 178})
+
+
+def _set_weekly_reset(gateway, reset: datetime) -> None:
+    snapshot = gateway.me_response.current_account.usage_snapshot
+    gateway.me_response = gateway.me_response.model_copy(
+        update={
+            "current_account": gateway.me_response.current_account.model_copy(
+                update={
+                    "usage_snapshot": snapshot.model_copy(
+                        update={
+                            "limits": [WeeklyLimit(group="weekly", kind="weekly_all", scope=None, percent="10", resets_at=reset, is_active=True)],
+                            "seven_day": SevenDay(utilization="10", resets_at=reset),
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_account_carries_over_revocation_and_auto_restores(app_context, fixed_clock):
+    factory, gateway, settings, quota, actions, task, user, now = await _seed_revoked_user(app_context)
+    async with factory() as session:
+        old_cycle = await quota.current_cycle(session, now)
+        old_revocation = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == old_cycle.id))
+        assert old_revocation.state == QuotaRevocationStatus.REVOKED.value
+    assert gateway.member_rows["u-1"].account_id is None
+
+    _add_second_account(gateway)
+    # The new account's week ends earlier than the old cycle, so it becomes current.
+    new_reset = datetime(2026, 8, 20, tzinfo=UTC)
+    _set_weekly_reset(gateway, new_reset)
+    gate = RecoveryGate(factory)
+    recovery = RecoveryService(gate, quota, gateway, settings)
+    fixed_clock[0] = now + timedelta(minutes=3)
+
+    account = await recovery.select_account(8123, 1)
+
+    assert account.account_id == 8123
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert state.selected_account_id == "8123"
+        # The previously RUNNING task resumes and re-opens the write latch.
+        assert state.write_enabled is True
+        task_row = await session.scalar(select(QuotaTask).where(QuotaTask.name_normalized == "default"))
+        assert task_row.status == TaskStatus.RUNNING.value
+        new_cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at == new_reset))
+        assert new_cycle is not None
+        carried = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == new_cycle.id))
+        assert carried is not None
+        assert carried.state == QuotaRevocationStatus.REVOKED.value
+        actions_logged = set((await session.scalars(select(AuditLog.action))).all())
+        assert "QUOTA_REVOCATION_CARRY_OVER" in actions_logged
+        assert "ACCOUNT_SWITCH_TASKS_RESUMED" in actions_logged
+
+    # The next regular ticks re-assign the carried-over member and reconcile RESTORED.
+    await poll_once(quota, actions, now=now + timedelta(minutes=4))
+    assert gateway.assign_calls == ["u-1"]
+    await poll_once(quota, actions, now=now + timedelta(minutes=5))
+    async with factory() as session:
+        carried = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == new_cycle.id))
+        assert carried.state == QuotaRevocationStatus.RESTORED.value
+
+
+@pytest.mark.asyncio
+async def test_select_account_rebaselines_current_cycle_usage(app_context, fixed_clock):
+    factory, gateway, settings = app_context
+    gateway.configure_account_id(4949)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd=Decimal("0"))
+    quota = QuotaService(factory, gateway, settings)
+    now = datetime(2026, 8, 18, tzinfo=UTC)
+    cycle = await quota.sync_cycle_from_me(now=now)
+    await quota.sync_members(now=now)
+    # Usage climbs after the baseline: $300 already spent in the current cycle.
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd=Decimal("300"))
+    await quota.sync_members(now=now + timedelta(minutes=1))
+    async with factory() as session:
+        baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id))
+        assert baseline.baseline_total_usd == Decimal("0")
+
+    # Re-selecting an account on the same weekly reset keeps the cycle but zeroes usage.
+    recovery = RecoveryService(RecoveryGate(factory), quota, gateway, settings)
+    fixed_clock[0] = now + timedelta(minutes=2)
+    account = await recovery.select_account(4949, 1)
+
+    assert account.account_id == 4949
+    async with factory() as session:
+        baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id))
+        assert baseline.baseline_total_usd == Decimal("300")
+        assert baseline.source == "account_switch"
+        assert baseline.status == BaselineStatus.VERIFIED.value
+        state = await session.get(ServiceState, 1)
+        # Nothing was RUNNING before the switch, so the latch stays closed.
+        assert state.selected_account_id == "4949"
+        assert state.write_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_carry_over_skips_restored_assigned_and_unbound_users(app_context, fixed_clock):
+    factory, gateway, settings = app_context
+    gateway.configure_account_id(4949)
+    gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=None, total_usage_usd=Decimal("0"))
+    gateway.member_rows["u-2"] = Member(user_id="u-2", email="two@example.com", account_id=4949, total_usage_usd=Decimal("0"))
+    gateway.member_rows["u-3"] = Member(user_id="u-3", email="three@example.com", account_id=None, total_usage_usd=Decimal("0"))
+    quota = QuotaService(factory, gateway, settings)
+    now = datetime(2026, 8, 18, tzinfo=UTC)
+    cycle = await quota.sync_cycle_from_me(now=now)
+    await quota.sync_members(now=now)
+    binding = BindingService(factory, gateway)
+    restored_user = await binding.bind(200, "one@example.com")
+    assigned_user = await binding.bind(201, "two@example.com")
+    unbound_user = await binding.bind(202, "three@example.com")
+    async with factory() as session:
+        async with session.begin():
+            session.add(QuotaRevocation(user_id=restored_user.id, cycle_id=cycle.id, state=QuotaRevocationStatus.RESTORED.value, reason="QUOTA", revoked_at=now, updated_at=now))
+            session.add(QuotaRevocation(user_id=assigned_user.id, cycle_id=cycle.id, state=QuotaRevocationStatus.REVOKED.value, reason="QUOTA", revoked_at=now, updated_at=now))
+            session.add(QuotaRevocation(user_id=unbound_user.id, cycle_id=cycle.id, state=QuotaRevocationStatus.REVOKED.value, reason="QUOTA", revoked_at=now, updated_at=now))
+            (await session.get(User, unbound_user.id)).binding_status = BindingStatus.UNBOUND.value
+
+    _add_second_account(gateway)
+    new_reset = datetime(2026, 8, 20, tzinfo=UTC)
+    _set_weekly_reset(gateway, new_reset)
+    recovery = RecoveryService(RecoveryGate(factory), quota, gateway, settings)
+    fixed_clock[0] = now + timedelta(minutes=1)
+
+    await recovery.select_account(8123, 1)
+
+    async with factory() as session:
+        new_cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at == new_reset))
+        assert new_cycle is not None
+        carried = (await session.scalars(select(QuotaRevocation).where(QuotaRevocation.cycle_id == new_cycle.id))).all()
+        assert carried == []

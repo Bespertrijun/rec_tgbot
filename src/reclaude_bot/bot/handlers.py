@@ -205,7 +205,7 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             account = await recovery.select_account(account_id, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"已选择 Reclaude 账号 {account.account_id}，周期和成员同步完成；限额任务仍为 STOPPED，请使用 /starttask 显式启动")
+            await message.answer(f"已选择 Reclaude 账号 {account.account_id}，周期和成员同步完成，本周期用量已清零；换号前运行的任务已自动恢复，被移除成员将随轮询自动加回。")
         except DomainError as exc:
             await message.answer(f"账号选择失败：{html.escape(str(exc))}")
         except Exception:

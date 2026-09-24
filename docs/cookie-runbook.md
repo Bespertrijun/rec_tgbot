@@ -19,12 +19,17 @@
    read-only and still displays a banned `current_account` so an operator can choose a
    healthy bound account. Run `/use <account_id>` for the selected record; it validates the
    lifecycle, health, and ID, then reconciles `GET /api/app/me`, the weekly cycle, and
-   `/members` before persisting the selection; writes remain disabled until `/starttask`. The legacy
+   `/members` before persisting the selection. A successful switch also zeroes current-cycle
+   usage baselines and carries still-active revocations into the current cycle, so the poll
+   loop restores removed members automatically, and resumes any tasks that were RUNNING
+   before the switch (re-opening writes); when no task was running, writes remain disabled
+   until `/starttask`. The legacy
    `/recovery_enable` alias retains the single-bound-account discovery flow. Account IDs
    come from each record's `account_id` (the separate database `id` is never used); no
    account ID or email mask is configured in `.env`.
-5. Inspect pending quota revocations. `/starttask` is the only command that may resume quota
-   enforcement writes after the checks pass; `/use` only selects and reconciles the account.
+5. Inspect pending quota revocations. `/use` resumes previously RUNNING tasks and with them
+   quota enforcement writes; `/starttask` remains the explicit per-task write switch when no
+   task was running.
    `/stoptask` stops the task; writes close once no task remains
    `RUNNING`, while the quota loop keeps syncing usage data. The first `401` forces every durable task back
    to `STOPPED` and requires this procedure; normal polling and write requests never retry the

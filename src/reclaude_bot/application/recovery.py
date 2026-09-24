@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.config import Settings
-from reclaude_bot.domain.enums import TaskStatus
+from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, QuotaRevocationStatus, TaskStatus, UserStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.infrastructure.db.models import QuotaTask, ServiceState
+from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaRevocation, QuotaTask, ServiceState, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse, MembersResponse, MeResponse
 
@@ -56,6 +57,40 @@ class RecoveryGate:
                 state.write_enabled = False
                 state.reason = reason
                 state.updated_at = now
+
+    async def running_task_ids(self) -> list[int]:
+        """Snapshot the tasks currently RUNNING, for resume after an account switch."""
+
+        async with self.session_factory() as session:
+            return list((await session.scalars(select(QuotaTask.id).where(QuotaTask.status == TaskStatus.RUNNING.value))).all())
+
+    async def resume_tasks(self, task_ids: list[int], operator_id: int | None = None) -> int:
+        """Restore the snapshotted tasks to RUNNING and re-open the latch after a successful switch."""
+
+        if not task_ids:
+            return 0
+        async with self.session_factory() as session:
+            async with session.begin():
+                state = await self._ensure_state(session, with_for_update=True)
+                now = utcnow()
+                await session.execute(
+                    update(QuotaTask)
+                    .where(QuotaTask.id.in_(task_ids), QuotaTask.status == TaskStatus.STOPPED.value)
+                    .values(status=TaskStatus.RUNNING.value, updated_at=now, updated_by=operator_id)
+                )
+                state.write_enabled = True
+                state.reason = "account_selected_task_resumed"
+                state.updated_at = now
+                await audit(
+                    session,
+                    actor_telegram_id=operator_id,
+                    actor_type="ADMIN" if operator_id is not None else "SYSTEM",
+                    action="ACCOUNT_SWITCH_TASKS_RESUMED",
+                    target_type="SERVICE",
+                    target_id="1",
+                    parameters_summary={"task_ids": [str(task_id) for task_id in task_ids]},
+                )
+                return len(task_ids)
 
     async def is_enabled(self, session: AsyncSession | None = None) -> bool:
         if session is not None:
@@ -133,8 +168,15 @@ class RecoveryService:
         return AccountListing(me=me, accounts=accounts, selected_account_id=selected_account_id)
 
     async def select_account(self, account_id: int | str, operator_id: int) -> AccountRecord:
-        """Validate, reconcile, and persist an account without enabling quota writes."""
+        """Validate, reconcile, and persist an account, resuming the tasks it interrupted.
 
+        A successful switch also resets current-cycle baselines (usage starts at
+        zero on the new account) and carries still-active revocations into the
+        current cycle, so the regular reconcile loop restores removed members once
+        the resumed tasks re-open the write latch.
+        """
+
+        running_task_ids = await self.gate.running_task_ids()
         await self.gate.force_stop("reclaude_account_selection_in_progress")
         self.gateway.account_id = None
         try:
@@ -154,7 +196,11 @@ class RecoveryService:
                 raise EligibilityError("Reclaude 成员响应无效")
             await self.quota.sync_cycle_from_me(me=me)
             await self.quota.sync_members(members=members)
+            now = utcnow()
+            await self._rebaseline_current_cycle(now)
+            await self._carry_over_revocations(now, operator_id)
             await self.gate.persist_selected_account(selected_id, operator_id)
+            await self.gate.resume_tasks(running_task_ids, operator_id)
             return account
         except Exception as exc:
             self.gateway.account_id = None
@@ -164,6 +210,93 @@ class RecoveryService:
             except Exception:
                 pass
             raise
+
+    async def _rebaseline_current_cycle(self, now: datetime) -> int:
+        """Reset current-cycle baselines to the freshly synced member totals."""
+
+        async with self.gate.session_factory() as session:
+            async with session.begin():
+                cycle = await self.quota.current_cycle(session, now)
+                if cycle is None:
+                    return 0
+                members = {member.reclaude_user_id: member for member in (await session.scalars(select(UpstreamMember))).all()}
+                baselines = (await session.scalars(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id).with_for_update())).all()
+                count = 0
+                for baseline in baselines:
+                    member = members.get(baseline.reclaude_user_id)
+                    if member is None:
+                        continue
+                    baseline.baseline_total_usd = member.total_usage_usd
+                    baseline.baseline_captured_at = now
+                    baseline.status = BaselineStatus.VERIFIED.value
+                    baseline.source = "account_switch"
+                    count += 1
+                return count
+
+    async def _carry_over_revocations(self, now: datetime, operator_id: int) -> int:
+        """Carry still-active revocations into the current cycle for the reconcile loop.
+
+        The restore branch only inspects the current cycle, so a switch that rolls
+        into a new cycle would otherwise strand every member the bot revoked. The
+        carried-over REVOKED row lets the regular restore path re-assign them.
+        """
+
+        async with self.gate.session_factory() as session:
+            async with session.begin():
+                cycle = await self.quota.current_cycle(session, now)
+                if cycle is None:
+                    return 0
+                latest_ids = select(func.max(QuotaRevocation.id)).group_by(QuotaRevocation.user_id)
+                rows = (
+                    (
+                        await session.execute(
+                            select(QuotaRevocation, User)
+                            .join(User, User.id == QuotaRevocation.user_id)
+                            .join(UpstreamMember, UpstreamMember.reclaude_user_id == User.reclaude_user_id)
+                            .where(
+                                QuotaRevocation.id.in_(latest_ids),
+                                QuotaRevocation.state.in_(
+                                    [
+                                        QuotaRevocationStatus.PENDING_REVOKE.value,
+                                        QuotaRevocationStatus.REVOKED.value,
+                                        QuotaRevocationStatus.PENDING_RESTORE.value,
+                                    ]
+                                ),
+                                User.binding_status == BindingStatus.BOUND.value,
+                                User.status == UserStatus.ACTIVE.value,
+                                UpstreamMember.account_id.is_(None),
+                            )
+                        )
+                    )
+                    .tuples()
+                    .all()
+                )
+                existing = set((await session.scalars(select(QuotaRevocation.user_id).where(QuotaRevocation.cycle_id == cycle.id))).all())
+                count = 0
+                for revocation, user in rows:
+                    if user.id in existing:
+                        continue
+                    session.add(
+                        QuotaRevocation(
+                            user_id=user.id,
+                            cycle_id=cycle.id,
+                            state=QuotaRevocationStatus.REVOKED.value,
+                            reason="QUOTA",
+                            revoked_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    count += 1
+                    await audit(
+                        session,
+                        actor_telegram_id=operator_id,
+                        actor_type="ADMIN",
+                        action="QUOTA_REVOCATION_CARRY_OVER",
+                        target_type="USER",
+                        target_id=str(user.id),
+                        parameters_summary={"reclaude_user_id": user.reclaude_user_id, "cycle_id": cycle.id, "from_state": revocation.state},
+                    )
+                return count
 
     async def validate_selected_account(self) -> AccountRecord:
         """Validate the persisted account before a task start or persisted-task resume."""

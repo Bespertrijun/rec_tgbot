@@ -12,7 +12,10 @@ members snapshot and cycle-baseline reconcile before enabling quota writes.
 The service fails closed when a selected account is not live, its lifecycle is not `bound`, its
 health is empty or `banned`, its `account_id` is missing or invalid, or a session request returns
 `401`. `/account` is a read-only live inventory (including a banned current account); `/use <account_id>`
-validates one selected record, reconciles it, and persists the selection without enabling writes.
+validates one selected record, reconciles it, zeroes current-cycle usage baselines, and carries
+still-active revocations into the current cycle so removed members are restored automatically once
+enforcement resumes. Tasks that were RUNNING before the switch resume automatically (re-opening
+writes); when no task was running, writes stay disabled until `/starttask`.
 Use `/starttask <name>` as the operator write switch per task, and `/stoptask <name>` to stop one;
 the write latch stays open while any task remains `RUNNING`, and the shared quota loop keeps
 syncing usage data even after every task has stopped. `/startstats` and `/stopstats` control the

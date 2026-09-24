@@ -20,7 +20,9 @@ backups are documented in [`docs/deployment.md`](docs/deployment.md). Never use 
 that has been pasted into chat, a ticket, source control, or CI output.
 
 The normal loop calls `/members` once per minute and keeps the latest member assignment
-and cumulative usage locally. Users only need `/bind email` and `/status`; administrators
+and cumulative usage locally. Users only need `/bind email` and `/status`, and can
+transfer part of their own cycle quota to another bound user with `/send @user amount`
+inside a managed group; administrators
 group members into named quota tasks with per-task limits (`/newtask`, `/settaskquota`) and
 inspect one task's usage with `/taskusers`. Account assignment itself remains an
 operator action in the Reclaude console.

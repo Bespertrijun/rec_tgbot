@@ -52,10 +52,11 @@ class BindingService:
             raise BindingError("绑定尝试次数过多，请稍后重试")
         history.append(now)
 
-    async def bind(self, telegram_user_id: int, email: str, *, private_chat: bool = True) -> User:
+    async def bind(self, telegram_user_id: int, email: str, *, private_chat: bool = True, telegram_username: str | None = None) -> User:
         if not private_chat:
             raise BindingError("绑定只能在 Bot 私聊中执行")
         now = utcnow()
+        username = telegram_username.casefold() if telegram_username else None
         self._check_rate(telegram_user_id, now)
         normalized = normalize_email(email)
         if "@" not in normalized or len(normalized) > 320:
@@ -72,6 +73,7 @@ class BindingService:
                 existing = existing_tg or existing_email or existing_reclaude
                 if existing:
                     if existing_tg is not None and existing_tg.binding_status == BindingStatus.UNBOUND.value:
+                        existing_tg.telegram_username = username
                         existing_tg.email = email.strip()
                         existing_tg.email_normalized = normalized
                         existing_tg.reclaude_user_id = member.reclaude_user_id
@@ -97,12 +99,14 @@ class BindingService:
                         )
                         result = existing_tg
                     elif existing.telegram_user_id == telegram_user_id and existing.email_normalized == normalized and existing.reclaude_user_id == member.reclaude_user_id:
+                        existing.telegram_username = username
                         result = existing
                     else:
                         raise BindingError("该绑定已被占用，请联系管理员")
                 else:
                     row = User(
                         telegram_user_id=telegram_user_id,
+                        telegram_username=username,
                         email=email.strip(),
                         email_normalized=normalized,
                         reclaude_user_id=member.reclaude_user_id,

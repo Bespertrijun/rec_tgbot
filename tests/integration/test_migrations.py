@@ -178,6 +178,28 @@ def test_multi_task_migration_backfills_members_and_downgrades(tmp_path, monkeyp
     finally:
         engine.dispose()
 
+def test_user_telegram_username_column_is_reversible(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "user-telegram-username.db"
+    config = _alembic_config(database)
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("users")}
+        assert "telegram_username" in columns
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0008_usage_notifications")
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("users")}
+        assert "telegram_username" not in columns
+    finally:
+        engine.dispose()
+
+
 def test_postgresql_append_only_ddl_is_explicit_and_reversible() -> None:
     source = MIGRATION.read_text()
 

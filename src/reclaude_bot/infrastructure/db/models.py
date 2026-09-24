@@ -33,6 +33,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    telegram_username: Mapped[str | None] = mapped_column(String(64))
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     email_normalized: Mapped[str] = mapped_column(String(320), nullable=False)
     reclaude_user_id: Mapped[str] = mapped_column(String(128), nullable=False)

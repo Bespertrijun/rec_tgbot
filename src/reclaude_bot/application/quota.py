@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.config import Settings
-from reclaude_bot.domain.enums import BaselineStatus, CycleStatus
+from reclaude_bot.domain.enums import BaselineStatus, CycleStatus, UserStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import as_decimal, baseline_is_timely, cycle_used, ensure_utc, estimate_window_total, is_last_24h
 from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaAdjustment, QuotaCycle, RuntimeSetting, UpstreamMember, User
@@ -278,6 +278,122 @@ class QuotaService:
                     target_id=str(user_id),
                     parameters_summary={"amount_usd": str(amount), "reason": reason},
                 )
+
+    async def record_username(self, telegram_user_id: int, username: str | None) -> None:
+        """Refresh the cached Telegram username used to resolve group mentions in /send."""
+        if not username:
+            return
+        async with self.session_factory() as session:
+            async with session.begin():
+                user = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id).with_for_update())
+                if user is not None and user.telegram_username != username.casefold():
+                    user.telegram_username = username.casefold()
+                    user.updated_at = utcnow()
+
+    async def transfer_quota(
+        self,
+        sender_telegram_id: int,
+        *,
+        amount: Decimal,
+        recipient_telegram_id: int | None = None,
+        recipient_username: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Move part of the sender's own current-cycle quota to another bound user.
+
+        Both sides land as QuotaAdjustment rows in the current cycle, so /status,
+        /taskusers, and the enforcement loop all see the transfer unchanged.
+        """
+        moment = ensure_utc(now or utcnow())
+        amount = as_decimal(amount)
+        if not amount.is_finite() or amount <= 0:
+            raise EligibilityError("转账金额必须大于 0")
+        async with self.session_factory() as session:
+            async with session.begin():
+                sender = await session.scalar(select(User).where(User.telegram_user_id == sender_telegram_id).with_for_update())
+                if sender is None or sender.binding_status != "BOUND":
+                    raise EligibilityError("您尚未绑定")
+                if sender.status != UserStatus.ACTIVE.value:
+                    raise EligibilityError("您的账号已被禁用")
+                recipient: User | None = None
+                if recipient_telegram_id is not None:
+                    recipient = await session.scalar(select(User).where(User.telegram_user_id == recipient_telegram_id).with_for_update())
+                elif recipient_username:
+                    recipient = await session.scalar(
+                        select(User)
+                        .where(User.telegram_username == recipient_username.casefold())
+                        .order_by(desc(User.updated_at))
+                        .limit(1)
+                        .with_for_update()
+                    )
+                if recipient is None or recipient.binding_status != "BOUND":
+                    raise EligibilityError("对方尚未绑定，无法转账；若对方刚改过用户名，请让其在群内先使用一次 /status")
+                if recipient.id == sender.id:
+                    raise EligibilityError("不能转账给自己")
+                if recipient.status != UserStatus.ACTIVE.value:
+                    raise EligibilityError("对方账号已被禁用")
+                cycle = await self.current_cycle(session, moment)
+                if cycle is None:
+                    raise EligibilityError("当前周期不可用")
+                baselines = {
+                    baseline.reclaude_user_id: baseline
+                    for baseline in (
+                        await session.scalars(
+                            select(CycleBaseline).where(
+                                CycleBaseline.cycle_id == cycle.id,
+                                CycleBaseline.reclaude_user_id.in_([sender.reclaude_user_id, recipient.reclaude_user_id]),
+                            ).with_for_update()
+                        )
+                    ).all()
+                }
+                sender_baseline = baselines.get(sender.reclaude_user_id)
+                if sender_baseline is None:
+                    raise EligibilityError("您当前周期基线尚未建立")
+                if recipient.reclaude_user_id not in baselines:
+                    raise EligibilityError("对方当前周期基线尚未建立")
+                member = await session.scalar(select(UpstreamMember).where(UpstreamMember.reclaude_user_id == sender.reclaude_user_id))
+                if member is None:
+                    raise EligibilityError("等待首次成员同步")
+                adjustments = (await session.scalars(select(QuotaAdjustment).where(QuotaAdjustment.user_id == sender.id, QuotaAdjustment.cycle_id == cycle.id))).all()
+                used = cycle_used(member.total_usage_usd, sender_baseline.baseline_total_usd, [item.amount_usd for item in adjustments])
+                limit = await self._runtime_limit(session, create=False)
+                remaining = max(Decimal("0"), limit - used)
+                if amount > remaining:
+                    raise EligibilityError(f"剩余额度不足：当前剩余 ${remaining:.2f}")
+                session.add(
+                    QuotaAdjustment(
+                        user_id=sender.id,
+                        cycle_id=cycle.id,
+                        amount_usd=amount,
+                        reason=f"TRANSFER_OUT user:{recipient.id}",
+                        operator_telegram_id=sender_telegram_id,
+                        created_at=moment,
+                    )
+                )
+                session.add(
+                    QuotaAdjustment(
+                        user_id=recipient.id,
+                        cycle_id=cycle.id,
+                        amount_usd=-amount,
+                        reason=f"TRANSFER_IN user:{sender.id}",
+                        operator_telegram_id=sender_telegram_id,
+                        created_at=moment,
+                    )
+                )
+                await audit(
+                    session,
+                    actor_telegram_id=sender_telegram_id,
+                    actor_type="USER",
+                    action="QUOTA_TRANSFER",
+                    target_type="USER",
+                    target_id=str(recipient.id),
+                    parameters_summary={"sender_user_id": sender.id, "amount_usd": str(amount)},
+                )
+                return {
+                    "amount_usd": amount,
+                    "recipient_email": recipient.email,
+                    "sender_remaining_usd": remaining - amount,
+                }
 
     async def get_status(self, telegram_user_id: int, *, now: datetime | None = None) -> dict[str, Any]:
         moment = ensure_utc(now or utcnow())

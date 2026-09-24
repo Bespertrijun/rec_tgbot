@@ -28,6 +28,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
         {"command": "start", "description": "开始使用"},
         {"command": "bind", "description": "绑定邮箱（需要参数）"},
         {"command": "status", "description": "查看额度状态"},
+        {"command": "send", "description": "群内转账额度给其他用户"},
     ]
 
     for call, admin_id in zip(calls[1:], [101, 202], strict=True):
@@ -38,6 +39,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
             {"command": "start", "description": "开始使用"},
             {"command": "bind", "description": "绑定邮箱（需要参数）"},
             {"command": "status", "description": "查看额度状态"},
+            {"command": "send", "description": "群内转账额度给其他用户"},
             {"command": "sync", "description": "同步上游成员"},
             {"command": "member", "description": "查看上游成员列表"},
             {"command": "setquota", "description": "设置全局默认额度"},

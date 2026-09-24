@@ -16,6 +16,7 @@ _USER_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "开始使用"),
     ("bind", "绑定邮箱（需要参数）"),
     ("status", "查看额度状态"),
+    ("send", "群内转账额度给其他用户"),
 )
 
 _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (

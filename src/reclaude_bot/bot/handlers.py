@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import html
 import traceback
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 
 import structlog
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import Message, MessageEntity
 from sqlalchemy import func, select
 
 from reclaude_bot.application.admin import AdminService
-from reclaude_bot.application.binding import BindingService
+from reclaude_bot.application.binding import BindingService, masked_email
 from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryService
@@ -67,7 +68,12 @@ def build_router(settings: Settings) -> Router:
         try:
             if message.from_user is None or not command.args:
                 raise ValueError
-            user = await binding.bind(message.from_user.id, command.args.strip(), private_chat=message.chat.type == "private")
+            user = await binding.bind(
+                message.from_user.id,
+                command.args.strip(),
+                private_chat=message.chat.type == "private",
+                telegram_username=message.from_user.username,
+            )
             pending = True
             if onboarding is not None:
                 try:
@@ -86,6 +92,7 @@ def build_router(settings: Settings) -> Router:
         try:
             if message.from_user is None:
                 return
+            await quota.record_username(message.from_user.id, message.from_user.username)
             value = await quota.get_status(message.from_user.id)
             email = str(value["email"])
             local, _, domain = email.partition("@")
@@ -100,6 +107,39 @@ def build_router(settings: Settings) -> Router:
             )
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
+
+    @router.message(Command("send"))
+    async def send(message: Message, quota: QuotaService) -> None:
+        if message.from_user is None:
+            return
+        if message.chat.type == "private":
+            await message.answer("只能在群组中使用：请在群里 @对方 后转账。")
+            return
+        await quota.record_username(message.from_user.id, message.from_user.username)
+        entities = list(message.entities or [])
+        mention = next((entity for entity in entities if entity.type in {"mention", "text_mention"}), None)
+        if mention is None:
+            await message.answer("用法：/send @对方 金额")
+            return
+        text = message.text or ""
+        spans = [entity for entity in entities if entity.type == "bot_command"] + [mention]
+        try:
+            amount = Decimal(_text_without_entities(text, spans).strip())
+        except InvalidOperation:
+            await message.answer("用法：/send @对方 金额")
+            return
+        try:
+            if mention.type == "text_mention" and mention.user is not None:
+                result = await quota.transfer_quota(message.from_user.id, amount=amount, recipient_telegram_id=mention.user.id)
+            else:
+                result = await quota.transfer_quota(message.from_user.id, amount=amount, recipient_username=mention.extract_from(text).lstrip("@"))
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+            return
+        await message.answer(
+            f"已转账 ${result['amount_usd']:.2f} 给 {html.escape(masked_email(str(result['recipient_email'])))}，"
+            f"你本周期剩余额度 ${result['sender_remaining_usd']:.2f}。"
+        )
 
     return router
 
@@ -556,6 +596,15 @@ def build_admin_router(settings: Settings) -> Router:
 
 def _format_datetime(value: object) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
+
+
+def _text_without_entities(text: str, entities: Iterable[MessageEntity]) -> str:
+    """Drop entity spans from raw message text; entity offsets are UTF-16 code units."""
+    encoded = text.encode("utf-16-le")
+    for entity in sorted(entities, key=lambda item: (item.offset, item.length), reverse=True):
+        start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+        encoded = encoded[:start] + encoded[end:]
+    return encoded.decode("utf-16-le")
 
 
 async def _account_usage_lines(quota: QuotaService) -> list[str]:

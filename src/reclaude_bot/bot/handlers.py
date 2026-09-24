@@ -53,7 +53,7 @@ def build_router(settings: Settings) -> Router:
                 await onboarding.queue_unmute_for_user(message.from_user.id)
                 await message.answer("验证成功，群组权限正在恢复，请稍候。")
             else:
-                await message.answer("验证成功，请在此私聊中发送 /bind <邮箱> 完成绑定。")
+                await message.answer("验证成功，请在此私聊中发送 /bind &lt;邮箱&gt; 完成绑定。")
             return
         await message.answer("请使用 /bind 邮箱 或 /status。")
 
@@ -99,7 +99,7 @@ def build_router(settings: Settings) -> Router:
                 f"分配状态：{value['allocation_status']}"
             )
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
 
     return router
 
@@ -162,7 +162,7 @@ def build_admin_router(settings: Settings) -> Router:
             value = await admin.set_quota(amount, message.from_user.id)  # type: ignore[union-attr]
             await message.answer(f"全局默认额度已设置为 ${value:.2f}（新建任务的默认值；现有任务请用 /settaskquota）")
         except (DomainError, InvalidOperation, ValueError) as exc:
-            await message.answer(str(exc) or "用法：/setquota 金额")
+            await message.answer(html.escape(str(exc)) or "用法：/setquota 金额")
 
     @router.message(Command("ban", "unban"))
     async def ban(message: Message, command: CommandObject, admin: AdminService) -> None:
@@ -186,7 +186,7 @@ def build_admin_router(settings: Settings) -> Router:
             await binding.unbind(int(args[0]), operator_telegram_id=message.from_user.id, force_revoke=len(args) > 1 and args[1] == "force")  # type: ignore[union-attr]
             await message.answer("解绑完成")
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
 
     @router.message(Command("audit"))
     async def audit_view(message: Message, admin: AdminService) -> None:
@@ -227,11 +227,11 @@ def build_admin_router(settings: Settings) -> Router:
         try:
             snapshot = await task.create_task(values[0], limit, message.from_user.id)  # type: ignore[union-attr]
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
             return
         await message.answer(
             f"限额任务 {html.escape(snapshot.name)} 已创建：STOPPED | 范围 ALL | 每用户额度 ${snapshot.limit_usd:.2f}。\n"
-            f"使用 /addtaskmember {html.escape(snapshot.name)} <reclaude_user_id> 限定成员，/starttask {html.escape(snapshot.name)} 启动。"
+            f"使用 /addtaskmember {html.escape(snapshot.name)} &lt;reclaude_user_id&gt; 限定成员，/starttask {html.escape(snapshot.name)} 启动。"
         )
 
     @router.message(Command("deltatask"))
@@ -243,7 +243,7 @@ def build_admin_router(settings: Settings) -> Router:
             await task.delete_task(name, message.from_user.id)  # type: ignore[union-attr]
             await message.answer(f"限额任务 {html.escape(name)} 及其成员范围已删除。")
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
 
     @router.message(Command("task"))
     async def task_status(message: Message, command: CommandObject, task: QuotaTaskService, jobs: BackgroundJobs, quota: QuotaService, recovery: RecoveryService) -> None:
@@ -301,7 +301,7 @@ def build_admin_router(settings: Settings) -> Router:
             lines.append(f"最近成员同步：{_format_datetime(last_sync)}")
             await message.answer("\n".join(lines))
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
         except Exception:
             await message.answer("任务状态暂时不可用。")
 
@@ -314,7 +314,7 @@ def build_admin_router(settings: Settings) -> Router:
             snapshot = await task.snapshot(name)
             usage = await quota.list_task_usage(scope_mode=snapshot.scope_mode, member_ids=snapshot.member_ids, limit_usd=snapshot.limit_usd)
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
             return
         except Exception as exc:
             log.error(
@@ -397,7 +397,7 @@ def build_admin_router(settings: Settings) -> Router:
             else:
                 await message.answer(f"限额任务 {html.escape(name)} 已停止，写操作已关闭；用量数据仍会继续同步统计。")
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
         except Exception:
             await message.answer("停止限额任务失败，请检查服务日志。")
 
@@ -432,18 +432,18 @@ def build_admin_router(settings: Settings) -> Router:
         elif len(values) == 1:
             name_arg, amount_arg = None, values[0]
         else:
-            await message.answer("用法：/settaskquota <任务名> 金额（仅一个任务时可省略任务名）")
+            await message.answer("用法：/settaskquota &lt;任务名&gt; 金额（仅一个任务时可省略任务名）")
             return
         try:
             amount = Decimal(amount_arg)
         except InvalidOperation:
-            await message.answer("用法：/settaskquota <任务名> 金额")
+            await message.answer("用法：/settaskquota &lt;任务名&gt; 金额")
             return
         try:
             name, value = await admin.set_task_quota(name_arg, amount, message.from_user.id)  # type: ignore[union-attr]
             await message.answer(f"任务 {html.escape(name)} 每用户额度已设置为 ${value:.2f}")
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
 
     @router.message(Command("addtaskmember"))
     async def add_task_member(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
@@ -521,7 +521,7 @@ def build_admin_router(settings: Settings) -> Router:
             await recovery.health_sync_reconcile_enable(message.from_user.id)  # type: ignore[union-attr]
             await message.answer("账号、周期和成员健康检查完成；限额任务仍为 STOPPED，请使用 /starttask 显式启动。")
         except DomainError as exc:
-            await message.answer(str(exc))
+            await message.answer(html.escape(str(exc)))
         except Exception:
             await message.answer("恢复失败，写操作仍已暂停，请检查 Reclaude 登录和账号状态。")
 

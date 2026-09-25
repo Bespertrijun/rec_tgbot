@@ -92,7 +92,7 @@ def build_router(settings: Settings) -> Router:
         try:
             if message.from_user is None:
                 return
-            await quota.record_username(message.from_user.id, message.from_user.username)
+            await _record_username_safely(quota, message.from_user.id, message.from_user.username)
             value = await quota.get_status(message.from_user.id)
             email = str(value["email"])
             local, _, domain = email.partition("@")
@@ -111,11 +111,12 @@ def build_router(settings: Settings) -> Router:
     @router.message(Command("send"))
     async def send(message: Message, quota: QuotaService) -> None:
         if message.from_user is None:
+            await message.answer("无法识别发送者：匿名管理员或频道身份不能使用 /send，请换回本人身份后重试。", skip_auto_delete=True)
             return
         if message.chat.type == "private":
             await message.answer("只能在群组中使用：请在群里 @对方 后转账。")
             return
-        await quota.record_username(message.from_user.id, message.from_user.username)
+        await _record_username_safely(quota, message.from_user.id, message.from_user.username)
         entities = list(message.entities or [])
         mention = next((entity for entity in entities if entity.type in {"mention", "text_mention"}), None)
         if mention is None:
@@ -134,11 +135,21 @@ def build_router(settings: Settings) -> Router:
             else:
                 result = await quota.transfer_quota(message.from_user.id, amount=amount, recipient_username=mention.extract_from(text).lstrip("@"))
         except DomainError as exc:
-            await message.answer(html.escape(str(exc)))
+            log.info("quota_transfer_rejected", sender_telegram_id=message.from_user.id, error=str(exc))
+            await message.answer(html.escape(str(exc)), skip_auto_delete=True)
+            return
+        except Exception as exc:
+            log.error(
+                "quota_transfer_failed",
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
+            await message.answer("转账失败，请稍后重试。", skip_auto_delete=True)
             return
         await message.answer(
             f"已转账 ${result['amount_usd']:.2f} 给 {html.escape(masked_email(str(result['recipient_email'])))}，"
-            f"你本周期剩余额度 ${result['sender_remaining_usd']:.2f}。"
+            f"你本周期剩余额度 ${result['sender_remaining_usd']:.2f}。",
+            skip_auto_delete=True,
         )
 
     return router
@@ -596,6 +607,14 @@ def build_admin_router(settings: Settings) -> Router:
 
 def _format_datetime(value: object) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
+
+
+async def _record_username_safely(quota: QuotaService, telegram_user_id: int, username: str | None) -> None:
+    """Best-effort username cache refresh; a failure must never break the command itself."""
+    try:
+        await quota.record_username(telegram_user_id, username)
+    except Exception as exc:
+        log.warning("telegram_username_refresh_failed", telegram_user_id=telegram_user_id, error=str(exc))
 
 
 def _text_without_entities(text: str, entities: Iterable[MessageEntity]) -> str:

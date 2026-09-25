@@ -91,7 +91,7 @@ async def test_send_transfers_to_plain_mention_username() -> None:
 
     quota.record_username.assert_awaited_once_with(42, "alice")
     quota.transfer_quota.assert_awaited_once_with(42, amount=Decimal("12.5"), recipient_username="bob")
-    message.answer.assert_awaited_once_with("已转账 $12.50 给 b***@example.com，你本周期剩余额度 $87.50。")
+    message.answer.assert_awaited_once_with("已转账 $12.50 给 b***@example.com，你本周期剩余额度 $87.50。", skip_auto_delete=True)
 
 
 @pytest.mark.asyncio
@@ -110,7 +110,7 @@ async def test_send_transfers_to_text_mention_user_id_with_utf16_offsets() -> No
     await handler(message, quota)
 
     quota.transfer_quota.assert_awaited_once_with(42, amount=Decimal("10"), recipient_telegram_id=999)
-    message.answer.assert_awaited_once_with("已转账 $12.50 给 b***@example.com，你本周期剩余额度 $87.50。")
+    message.answer.assert_awaited_once_with("已转账 $12.50 给 b***@example.com，你本周期剩余额度 $87.50。", skip_auto_delete=True)
 
 
 @pytest.mark.asyncio
@@ -125,4 +125,48 @@ async def test_send_passes_domain_errors_through() -> None:
 
     await handler(message, quota)
 
-    message.answer.assert_awaited_once_with("剩余额度不足：当前剩余 $5.00")
+    message.answer.assert_awaited_once_with("剩余额度不足：当前剩余 $5.00", skip_auto_delete=True)
+
+
+@pytest.mark.asyncio
+async def test_send_reports_unexpected_transfer_errors() -> None:
+    handler = _send_handler()
+    message = _message(
+        text="/send @bob 10",
+        entities=[MessageEntity(type="bot_command", offset=0, length=5), MessageEntity(type="mention", offset=6, length=4)],
+    )
+    quota = _quota()
+    quota.transfer_quota.side_effect = RuntimeError("db exploded")
+
+    await handler(message, quota)
+
+    message.answer.assert_awaited_once_with("转账失败，请稍后重试。", skip_auto_delete=True)
+
+
+@pytest.mark.asyncio
+async def test_send_survives_username_refresh_failure() -> None:
+    handler = _send_handler()
+    message = _message(
+        text="/send @bob 12.5",
+        entities=[MessageEntity(type="bot_command", offset=0, length=5), MessageEntity(type="mention", offset=6, length=4)],
+    )
+    quota = _quota()
+    quota.record_username.side_effect = RuntimeError("column missing")
+
+    await handler(message, quota)
+
+    quota.transfer_quota.assert_awaited_once_with(42, amount=Decimal("12.5"), recipient_username="bob")
+    message.answer.assert_awaited_once_with("已转账 $12.50 给 b***@example.com，你本周期剩余额度 $87.50。", skip_auto_delete=True)
+
+
+@pytest.mark.asyncio
+async def test_send_explains_anonymous_senders_cannot_transfer() -> None:
+    handler = _send_handler()
+    message = _message(text="/send @bob 10", entities=[MessageEntity(type="bot_command", offset=0, length=5)])
+    message.from_user = None
+    quota = _quota()
+
+    await handler(message, quota)
+
+    message.answer.assert_awaited_once_with("无法识别发送者：匿名管理员或频道身份不能使用 /send，请换回本人身份后重试。", skip_auto_delete=True)
+    quota.transfer_quota.assert_not_awaited()

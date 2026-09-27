@@ -49,9 +49,9 @@ def _account() -> SimpleNamespace:
 
 
 _ACCOUNT_LINES = (
-    "账号：ma****@rekwa.com（快照 2026-08-18T05:00:00+00:00）\n"
+    "账号：ma****@rekwa.com（快照 2026-08-18 13:00:00（北京时间））\n"
     "5h 限额：已用 27.0% | 重置：未激活\n"
-    "7天限额：已用 6.0% | 重置：2026-08-25T05:00:00+00:00 | 预估总额度：≈$3500.00"
+    "7天限额：已用 6.0% | 重置：2026-08-25 13:00:00（北京时间） | 预估总额度：≈$3500.00"
 )
 
 
@@ -89,7 +89,7 @@ async def test_taskusers_handler_renders_all_member_shapes() -> None:
     await handler(message, _command(), task, quota)
 
     message.answer.assert_awaited_once_with(
-        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：4 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
+        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：4 个 | 任务额度 $50.00 | 周期刷新：2026-08-25 08:00:00（北京时间）\n"
         f"{_ACCOUNT_LINES}\n"
         "- alice&lt;admin&gt;@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00\n"
         "- bob@example.com | u-2 | 未绑定 | 已用 $3.00 | 剩余 $47.00\n"
@@ -111,7 +111,7 @@ async def test_taskusers_handler_degrades_when_account_usage_unavailable() -> No
     await handler(message, _command(), task, quota)
 
     message.answer.assert_awaited_once_with(
-        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：1 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
+        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：1 个 | 任务额度 $50.00 | 周期刷新：2026-08-25 08:00:00（北京时间）\n"
         "账号用量：暂时不可用（上游查询失败）\n"
         "- alice@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00"
     )

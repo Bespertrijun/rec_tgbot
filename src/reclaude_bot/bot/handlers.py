@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import traceback
 from collections.abc import Iterable
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import structlog
@@ -21,6 +22,7 @@ from reclaude_bot.application.updater import UpdateError, UpdateService
 from reclaude_bot.bot.middleware import GroupAccessMiddleware
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError
+from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord
 from reclaude_bot.jobs.scheduler import BackgroundJobs
@@ -101,7 +103,7 @@ def build_router(settings: Settings) -> Router:
                 f"本周期已用：${value['used_usd']:.2f}\n"
                 f"当前额度：${value['limit_usd']:.2f}\n"
                 f"剩余额度：${value['remaining_usd']:.2f}\n"
-                f"刷新时间：{value['reset_at'].isoformat()}\n"
+                f"刷新时间：{_format_datetime(value['reset_at'])}\n"
                 f"最后24小时：{'是' if value['last_24h'] else '否'}\n"
                 f"分配状态：{value['allocation_status']}"
             )
@@ -244,7 +246,7 @@ def build_admin_router(settings: Settings) -> Router:
         if not is_admin(message):
             return
         rows = await admin.recent_audit()
-        await message.answer("\n".join(f"{row.created_at.isoformat()} {row.action} {row.result}" for row in rows) or "暂无审计记录")
+        await message.answer("\n".join(f"{_format_datetime(row.created_at)} {row.action} {row.result}" for row in rows) or "暂无审计记录")
 
     @router.message(Command("use"))
     async def use_account(message: Message, command: CommandObject, recovery: RecoveryService) -> None:
@@ -606,6 +608,8 @@ def build_admin_router(settings: Settings) -> Router:
 
 
 def _format_datetime(value: object) -> str:
+    if isinstance(value, datetime):
+        return format_beijing(value)
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
 
 

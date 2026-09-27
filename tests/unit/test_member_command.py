@@ -42,7 +42,7 @@ async def test_member_handler_escapes_fields_and_reports_latest_sample() -> None
     await handler(message, quota)
 
     message.answer.assert_awaited_once_with(
-        "上游成员：2 个 | 最近同步：2026-08-18T01:00:00+00:00\n"
+        "上游成员：2 个 | 最近同步：2026-08-18 09:00:00（北京时间）\n"
         "- alice&lt;admin&gt;@example.com | u&lt;&amp;1\n"
         "- bob@example.com | u-2"
     )

@@ -15,6 +15,7 @@ from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.enums import CycleStatus, QuotaRevocationStatus, TaskStatus, UserStatus
 from reclaude_bot.domain.quota import as_decimal, cycle_used, ensure_utc, is_last_24h
+from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import (
     CycleBaseline,
     QuotaAdjustment,
@@ -270,7 +271,7 @@ class QuotaActionService:
             if user is None:
                 return
             if kind == "revoke":
-                reset_at = cycle.reset_at.isoformat() if cycle is not None else "unknown"
+                reset_at = format_beijing(cycle.reset_at) if cycle is not None else "unknown"
                 text = f"本周期额度已用完（限额 ${limit_usd}），{reset_at} 刷新后会自动恢复使用。"
             else:
                 text = f"本周期额度已恢复（限额 ${limit_usd}），可以继续使用了。"
@@ -283,7 +284,7 @@ class QuotaActionService:
         if self.user_notify_callback is None:
             return
         telegram_user_id, threshold, used, limit, reset_at = notice
-        text = f"本周期额度已使用 {threshold}%（已用 ${used:.2f} / 限额 ${limit:.2f}），{reset_at.isoformat()} 刷新。"
+        text = f"本周期额度已使用 {threshold}%（已用 ${used:.2f} / 限额 ${limit:.2f}），{format_beijing(reset_at)} 刷新。"
         if threshold >= 80:
             text += "达到 100% 后将暂停使用。"
         try:

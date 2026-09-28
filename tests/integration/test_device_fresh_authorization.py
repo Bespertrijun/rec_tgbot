@@ -42,12 +42,13 @@ async def authorize(runtime, method):
 
 
 @pytest.mark.parametrize("method", ["self", "admin"])
-async def test_authorization_refreshes_stale_cycle_before_accepting_even_when_task_stopped(lifecycle_db, method):
+@pytest.mark.parametrize("snapshot_age", [timedelta(0), timedelta(seconds=91), timedelta(hours=6)])
+async def test_authorization_refreshes_stale_cycle_before_accepting_even_when_task_stopped(lifecycle_db, method, snapshot_age):
     factory, _ = lifecycle_db
     cycle_id = await ready_cycle(factory, running=False)
     async with factory.begin() as session:
         (await session.get(DeviceQuotaCycle, cycle_id)).last_day_checked_at = NOW - timedelta(hours=1)
-    runtime = wired(factory)
+    runtime = wired(factory, fresh=snapshot(sampled_at=NOW - snapshot_age))
     result = await authorize(runtime, method)
     assert result.status == "SUCCEEDED"
     runtime.source.get_usage.assert_awaited_once_with(178)
@@ -70,13 +71,14 @@ async def test_refresh_failure_cannot_fall_back_to_valid_looking_cached_evidence
 
 
 @pytest.mark.parametrize("method", ["self", "admin"])
-async def test_cached_last_day_permission_is_withdrawn_when_live_weekly_usage_is_full(lifecycle_db, method):
+@pytest.mark.parametrize("snapshot_age", [timedelta(0), timedelta(hours=6)])
+async def test_cached_last_day_permission_is_withdrawn_when_live_weekly_usage_is_full(lifecycle_db, method, snapshot_age):
     factory, _ = lifecycle_db
     reset = NOW + timedelta(hours=23)
     cycle_id = await ready_cycle(factory, reset=reset, allow_last_day=True)
     association_id, _ = await metered_user(factory, cycle_id, "700", locked=True)
     await end_association(factory, association_id, at=NOW)
-    runtime = wired(factory, fresh=snapshot(reset=reset, percent="100"))
+    runtime = wired(factory, fresh=snapshot(reset=reset, percent="100", sampled_at=NOW - snapshot_age))
     with pytest.raises(EligibilityError):
         await authorize(runtime, method)
     runtime.source.get_usage.assert_awaited_once_with(178)
@@ -85,13 +87,14 @@ async def test_cached_last_day_permission_is_withdrawn_when_live_weekly_usage_is
 
 
 @pytest.mark.parametrize("method", ["self", "admin"])
-async def test_live_last_day_permission_allows_manual_reauthorization(lifecycle_db, method):
+@pytest.mark.parametrize("snapshot_age", [timedelta(0), timedelta(hours=6)])
+async def test_live_last_day_permission_allows_manual_reauthorization(lifecycle_db, method, snapshot_age):
     factory, _ = lifecycle_db
     reset = NOW + timedelta(hours=23)
     cycle_id = await ready_cycle(factory, reset=reset, allow_last_day=False)
     association_id, _ = await metered_user(factory, cycle_id, "700", locked=True)
     await end_association(factory, association_id, at=NOW)
-    runtime = wired(factory, fresh=snapshot(reset=reset, percent="90"))
+    runtime = wired(factory, fresh=snapshot(reset=reset, percent="90", sampled_at=NOW - snapshot_age))
     assert (await authorize(runtime, method)).status == "SUCCEEDED"
     runtime.gateway.revoke_device.assert_not_called()
 

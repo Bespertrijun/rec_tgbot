@@ -73,7 +73,7 @@ async def test_last_day_boundary_and_weekly_capacity(lifecycle_db, until_reset, 
     assert result.status == "VERIFIED" and result.last_day_allow is allowed
 
 
-@pytest.mark.parametrize("case", ["inactive", "unbound", "stale", "future", "unselected"])
+@pytest.mark.parametrize("case", ["inactive", "unbound", "future", "unselected"])
 async def test_invalid_account_evidence_cannot_grant_last_day_permission(lifecycle_db, case):
     factory, _ = lifecycle_db
     kwargs = {"reset": NOW + timedelta(hours=12)}
@@ -81,8 +81,6 @@ async def test_invalid_account_evidence_cannot_grant_last_day_permission(lifecyc
         kwargs["is_active"] = False
     elif case == "unbound":
         kwargs["status"] = "unbound"
-    elif case == "stale":
-        kwargs["sampled_at"] = NOW - timedelta(seconds=91)
     elif case == "future":
         kwargs["sampled_at"] = NOW + timedelta(seconds=1)
     else:

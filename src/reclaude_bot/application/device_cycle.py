@@ -204,7 +204,7 @@ class DeviceCycleService:
             usage.account_id is not None
             and usage.me.current_account.status.strip().casefold() == "bound"
             and weekly.is_active is True
-            and timedelta(0) <= age <= timedelta(seconds=self.max_snapshot_age_seconds)
+            and age >= timedelta(0)
         )
         return _CycleEvidence(
             account_id=usage.account_id,

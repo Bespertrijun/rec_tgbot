@@ -30,4 +30,4 @@ runtime over data created by the legacy member-allocation quota loop; legacy bal
 not automatically migrated or reset.
 
 首次从旧版切换请参考[中文上线步骤](docs/device-cutover-zh.md)：旧余额按已确认规则作废，
-新旧数据库独立保留，并说明已有设备关联的计费起点与待核对限制。
+完整迁移旧库并保留用户绑定及群配置，同时说明已有设备关联的计费起点与待核对限制。

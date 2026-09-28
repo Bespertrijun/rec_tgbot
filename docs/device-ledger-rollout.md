@@ -6,7 +6,9 @@ balance model. No legacy balance import or account-switch migration is implement
 
 On 2026-09-28 the operator confirmed that legacy remaining balances are retired at
 cutover. Preserve the old database as a backup; do not import its balances into device
-ledgers. See [the Chinese cutover checklist](device-cutover-zh.md).
+ledgers. Restore the complete legacy database before running device migrations so that
+user bindings and group configuration remain intact; no user rebind is required.
+See [the Chinese cutover checklist](device-cutover-zh.md).
 
 Do not deploy this runtime over a database whose existing quota balances must remain
 spendable until a reviewed conversion or retirement plan exists. Starting the new image

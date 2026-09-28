@@ -109,8 +109,10 @@ def test_log_file_path_is_optional_and_blank_values_disable_file_logging() -> No
 
 def test_dev_compose_uses_named_cookie_and_log_volumes() -> None:
     compose = (Path(__file__).parents[2] / "docker-compose.dev.yml").read_text()
-    assert "- reclaude-cookies:/var/lib/reclaude-bot/cookies" in compose
-    assert "- reclaude-logs:/var/lib/reclaude-bot/logs" in compose
+    assert "name: reclaude-device-dev" in compose
+    assert "- device-cookies:/var/lib/reclaude-bot/cookies" in compose
+    assert "- device-logs:/var/lib/reclaude-bot/logs" in compose
+    assert "- device-postgres-data:/var/lib/postgresql/data" in compose
     assert "\n  permissions:" not in compose
 
 

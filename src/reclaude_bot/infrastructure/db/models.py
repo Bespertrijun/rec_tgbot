@@ -547,6 +547,11 @@ class DeviceUsageSegment(Base):
             name="ck_device_usage_segments_confirmed_used_range",
         ),
         CheckConstraint(
+            "imported_used_usd IS NULL OR "
+            "(imported_used_usd >= 0 AND imported_used_usd < 100000000)",
+            name="ck_device_usage_segments_imported_used_range",
+        ),
+        CheckConstraint(
             "quality <> 'VERIFIED' OR "
             "(baseline_total_usd IS NOT NULL AND latest_total_usd IS NOT NULL AND confirmed_used_usd IS NOT NULL)",
             name="ck_device_usage_segments_verified_has_values",
@@ -567,6 +572,7 @@ class DeviceUsageSegment(Base):
     latest_total_usd: Mapped[Decimal | None] = mapped_column(MONEY)
     latest_sampled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_used_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    imported_used_usd: Mapped[Decimal | None] = mapped_column(MONEY)
     quality: Mapped[str] = mapped_column(String(32), nullable=False)
 
 

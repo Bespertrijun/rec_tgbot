@@ -49,6 +49,14 @@ The task's write state and `RecoveryGate.write_enabled` both guard automatic quo
 Manual `/deauth` and `/deauthuser` do not depend on the automatic write latch. Manual
 `/auth` still requires current task scope and verified quota evidence. Admin
 `/authuser <email> <device_id>` resolves an already-bound local user; it never creates one.
+For the initial migration only, `/authuser <email> <device_id> [task] --used 500`
+records $500 of confirmed cycle consumption and captures the device's current `all`
+total as the baseline for subsequent increments. It does not add or subtract quota.
+The user must have no prior device association and no current-cycle ledger. Repeating
+the same active association and original amount is idempotent; a different amount is
+rejected. A failed baseline query leaves no association or partial import. Ordinary
+commands without `--used` retain their existing behavior. Imported consumption remains
+part of the user's cycle total after device changes, and follows normal quota enforcement.
 Admin `/deauthuser <email>` uses the same identity lookup. Ban only disables a local user
 and does not revoke a device. `/unbind` refuses while an association is open; complete
 `/deauthuser` and wait for confirmed revocation first.

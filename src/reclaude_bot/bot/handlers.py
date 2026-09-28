@@ -383,19 +383,50 @@ def build_admin_router(settings: Settings) -> Router:
     async def auth_user_device(message: Message, command: CommandObject, device_admin: DeviceAdminService) -> None:
         if not is_admin(message):
             return
-        values = (command.args or "").split()
+        raw_values = (command.args or "").split()
+        used_usd: Decimal | None = None
+        if "--used" in raw_values:
+            if raw_values.count("--used") != 1:
+                await message.answer("用法：/authuser 邮箱 设备ID [任务名] --used 金额")
+                return
+            used_index = raw_values.index("--used")
+            if used_index != len(raw_values) - 2:
+                await message.answer("用法：/authuser 邮箱 设备ID [任务名] --used 金额")
+                return
+            try:
+                used_usd = Decimal(raw_values[-1])
+            except InvalidOperation:
+                await message.answer("--used 金额格式无效")
+                return
+            raw_values = raw_values[:used_index]
+        values = raw_values
         if len(values) not in {2, 3} or not values[1].isdigit():
-            await message.answer("用法：/authuser 邮箱 设备ID [任务名]")
+            await message.answer("用法：/authuser 邮箱 设备ID [任务名] [--used 金额]")
             return
         try:
             user_id = await _find_existing_user_by_email(device_admin.session_factory, values[0])
-            result = await device_admin.authuser(
-                user_id,
-                int(values[1]),
-                message.from_user.id,  # type: ignore[union-attr]
-                task_name=values[2] if len(values) == 3 else None,
+            operator_id = message.from_user.id  # type: ignore[union-attr]
+            task_name = values[2] if len(values) == 3 else None
+            if used_usd is None:
+                result = await device_admin.authuser(
+                    user_id,
+                    int(values[1]),
+                    operator_id,
+                    task_name=task_name,
+                )
+            else:
+                result = await device_admin.authuser(
+                    user_id,
+                    int(values[1]),
+                    operator_id,
+                    task_name=task_name,
+                    used_usd=used_usd,
+                )
+            imported = f" | 当前周期已用导入 ${used_usd}" if used_usd is not None else ""
+            await message.answer(
+                f"设备关联已建立：{html.escape(masked_email(values[0]))} | 设备 {result.device_id} | "
+                f"关联 {result.association_id}{imported}"
             )
-            await message.answer(f"设备关联已建立：{html.escape(masked_email(values[0]))} | 设备 {result.device_id} | 关联 {result.association_id}")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
         except Exception:

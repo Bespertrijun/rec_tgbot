@@ -116,12 +116,14 @@ async def inspect_database(url, *, seed=False, populate=None):
         await engine.dispose()
 
 
-async def schema_diff(url, *, include_c3=True, include_d2=True):
+async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=True):
     engine = create_async_engine(url)
     try:
         async with engine.connect() as connection:
             def compare(sync_connection):
                 def include(obj, name, kind, reflected, compare_to):
+                    if name in {"imported_used_usd", "ck_device_usage_segments_imported_used_range"} and (not include_import or not include_c3 or not include_d2):
+                        return False
                     if kind == "table":
                         return name in (NEW if include_c3 else NEW_B1 | NEW_B2)
                     if not include_c3 and kind == "column" and name == "scope_mode" and obj.table.name == "device_task_scopes":
@@ -148,7 +150,7 @@ def test_upgrade_preserves_legacy_rows_and_empty_downgrade_is_reversible(migrati
     command.upgrade(config, "head")
     after_tables, after_rows, version = asyncio.run(inspect_database(migration_url))
     assert after_tables == before_tables | NEW
-    assert version == "0014_device_auth_result"
+    assert version == "0015_device_usage_import"
     assert {name: after_rows[name] for name in before_rows} == before_rows
     assert all(after_rows[name] == [] for name in NEW)
     assert asyncio.run(schema_diff(migration_url)) == []
@@ -407,7 +409,7 @@ def test_auth_result_upgrade_preserves_existing_actions_and_empty_result_can_rev
             assert after_rows[name] == rows[name]
     assert tuple(after_rows["device_actions"][0][:-1]) == tuple(rows["device_actions"][0])
     assert after_rows["device_actions"][0][-1] is None
-    assert asyncio.run(schema_diff(migration_url)) == []
+    assert asyncio.run(schema_diff(migration_url, include_import=False)) == []
     command.downgrade(config, "0013_device_task_members")
     assert asyncio.run(inspect_database(migration_url)) == (tables, rows, version)
 
@@ -430,4 +432,47 @@ def test_auth_result_downgrade_never_discards_approval_evidence(migration_url, r
     before = asyncio.run(inspect_database(migration_url))
     with pytest.raises(RuntimeError, match="cannot downgrade 0014"):
         command.downgrade(config, "0013_device_task_members")
+    assert asyncio.run(inspect_database(migration_url)) == before
+
+
+@pytest.mark.parametrize("migration_url", ["postgresql"], indirect=True)
+def test_import_column_upgrade_preserves_old_usage_and_bindings(migration_url):
+    config = config_for(migration_url)
+    command.upgrade(config, "0014_device_auth_result")
+    asyncio.run(inspect_database(migration_url, seed=True, populate="action"))
+    asyncio.run(populate_accounting(migration_url, "segment"))
+    tables, rows, version = asyncio.run(inspect_database(migration_url))
+    command.upgrade(config, "head")
+    new_tables, new_rows, _ = asyncio.run(inspect_database(migration_url))
+    assert new_tables == tables
+    for name, old_rows in rows.items():
+        if name == "device_usage_segments":
+            assert [tuple(row[:-1]) for row in new_rows[name]] == [tuple(row) for row in old_rows]
+            assert all(row[-1] is None for row in new_rows[name])
+        else:
+            assert new_rows[name] == old_rows
+    assert asyncio.run(schema_diff(migration_url)) == []
+    command.downgrade(config, "0014_device_auth_result")
+    assert asyncio.run(inspect_database(migration_url)) == (tables, rows, version)
+
+
+@pytest.mark.parametrize("migration_url", ["postgresql"], indirect=True)
+def test_import_evidence_cannot_be_lost_by_downgrade(migration_url):
+    config = config_for(migration_url)
+    command.upgrade(config, "head")
+    asyncio.run(inspect_database(migration_url, seed=True, populate="action"))
+    asyncio.run(populate_accounting(migration_url, "segment"))
+
+    async def imported():
+        engine = create_async_engine(migration_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("UPDATE device_usage_segments SET imported_used_usd = 0"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(imported())
+    before = asyncio.run(inspect_database(migration_url))
+    with pytest.raises(RuntimeError):
+        command.downgrade(config, "0014_device_auth_result")
     assert asyncio.run(inspect_database(migration_url)) == before

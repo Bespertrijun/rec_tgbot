@@ -37,8 +37,8 @@ async def seed_and_read(url, *, seed=False):
                     "INSERT INTO device_usage_snapshots (org_id,device_id,sample_key,range,total_usd,sampled_at,payload) "
                     "VALUES (178,44500,'backup-sample','all',700.1234567890,now(),'{\"overview\":{\"total_usd\":\"700.1234567890\"}}')",
                     "INSERT INTO device_usage_segments (association_id,user_id,task_id,ledger_id,started_at,baseline_total_usd,baseline_captured_at,"
-                    "latest_total_usd,latest_sampled_at,confirmed_used_usd,quality) "
-                    "VALUES (900,900,1,900,now(),0,now(),700.1234567890,now(),700.1234567890,'VERIFIED')",
+                    "latest_total_usd,latest_sampled_at,confirmed_used_usd,imported_used_usd,quality) "
+                    "VALUES (900,900,1,900,now(),200,now(),700.1234567890,now(),700.1234567890,200,'VERIFIED')",
                     "INSERT INTO device_quota_adjustments (ledger_id,amount_usd,reason,operator_telegram_id,operation_key,created_at) "
                     "VALUES (900,12.3456789012,'backup test',999,'backup-adjustment',now())",
                     "INSERT INTO device_notifications (ledger_id,event,status,attempt_count,created_at,updated_at,payload) "

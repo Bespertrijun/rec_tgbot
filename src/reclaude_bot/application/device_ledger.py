@@ -189,6 +189,151 @@ class DeviceLedgerService:
                     )
                 return self._result(ledger, segment)
 
+    async def import_initial_usage(
+        self,
+        session: AsyncSession,
+        association_id: int,
+        cycle_id: int,
+        snapshot: DeviceUsageSnapshot,
+        imported_used_usd: Decimal,
+        operator_id: int,
+    ) -> DeviceLedgerResult:
+        self._validate_id(association_id, "设备关联 ID")
+        self._validate_id(cycle_id, "设备周期 ID")
+        self._validate_id(operator_id, "管理员 ID")
+        imported = self._stored_money(imported_used_usd)
+        baseline = self._stored_money(snapshot.total_usd)
+        now = self._now()
+
+        association = await session.scalar(
+            select(DeviceAssociation).where(DeviceAssociation.id == association_id).with_for_update()
+        )
+        if association is None or association.org_id != self.org_id or association.ended_at is not None:
+            raise EligibilityError("待导入的设备关联已变化")
+        scope = await session.scalar(
+            select(DeviceTaskScope).where(DeviceTaskScope.task_id == association.task_id).with_for_update()
+        )
+        user = await session.scalar(select(User).where(User.id == association.user_id).with_for_update())
+        cycle = await session.scalar(
+            select(DeviceQuotaCycle).where(DeviceQuotaCycle.id == cycle_id).with_for_update()
+        )
+        if (
+            scope is None
+            or scope.org_id != self.org_id
+            or user is None
+            or association.state != "ACTIVE"
+            or association.device_id is None
+            or cycle is None
+            or cycle.task_id != association.task_id
+            or cycle.status != "VERIFIED"
+            or not ensure_utc(cycle.started_at) <= now < ensure_utc(cycle.reset_at)
+            or not ensure_utc(cycle.started_at) <= ensure_utc(snapshot.sampled_at) < ensure_utc(cycle.reset_at)
+            or ensure_utc(snapshot.sampled_at) < ensure_utc(association.started_at)
+            or snapshot.org_id != self.org_id
+            or snapshot.device_id != association.device_id
+            or snapshot.range != "all"
+        ):
+            raise EligibilityError("设备消费导入周期或基线来源已变化")
+
+        current_cycle_id = await session.scalar(
+            select(DeviceQuotaCycle.id)
+            .where(
+                DeviceQuotaCycle.task_id == association.task_id,
+                DeviceQuotaCycle.status == "VERIFIED",
+                DeviceQuotaCycle.started_at <= now,
+                DeviceQuotaCycle.reset_at > now,
+            )
+            .order_by(DeviceQuotaCycle.reset_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if current_cycle_id != cycle.id:
+            raise EligibilityError("设备周期在基线查询期间发生变化，请重新执行 /authuser")
+
+        auth_action = await session.scalar(
+            select(DeviceAction)
+            .where(
+                DeviceAction.association_id == association.id,
+                DeviceAction.kind == "AUTH",
+                DeviceAction.status == "SUCCEEDED",
+                DeviceAction.target_device_id == association.device_id,
+            )
+            .order_by(DeviceAction.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if auth_action is None:
+            raise EligibilityError("设备消费导入缺少成功授权记录")
+
+        prior_association = await session.scalar(
+            select(DeviceAssociation.id)
+            .where(DeviceAssociation.user_id == user.id, DeviceAssociation.id != association.id)
+            .limit(1)
+            .with_for_update()
+        )
+        existing_ledger = await session.scalar(
+            select(DeviceCycleLedger.id)
+            .where(
+                DeviceCycleLedger.user_id == user.id,
+                DeviceCycleLedger.cycle_id == cycle.id,
+            )
+            .with_for_update()
+        )
+        if prior_association is not None or existing_ledger is not None:
+            raise EligibilityError("本次导入仅支持当前周期内没有既有关联或账本历史的首次关联")
+
+        session.add(snapshot)
+        await session.flush()
+        ledger = DeviceCycleLedger(
+            user_id=user.id,
+            cycle_id=cycle.id,
+            task_id=association.task_id,
+            confirmed_used_usd=imported,
+            quality="VERIFIED",
+            quota_locked_at=None,
+            quota_unlocked_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(ledger)
+        await session.flush()
+        segment = DeviceUsageSegment(
+            association_id=association.id,
+            user_id=user.id,
+            task_id=association.task_id,
+            ledger_id=ledger.id,
+            started_at=ensure_utc(association.started_at),
+            ended_at=None,
+            baseline_total_usd=baseline,
+            baseline_captured_at=ensure_utc(snapshot.sampled_at),
+            latest_total_usd=baseline,
+            latest_sampled_at=ensure_utc(snapshot.sampled_at),
+            confirmed_used_usd=imported,
+            imported_used_usd=imported,
+            quality="VERIFIED",
+        )
+        session.add(segment)
+        await session.flush()
+        self._refresh_ledger(ledger, [segment], False, now)
+        await audit(
+            session,
+            actor_telegram_id=operator_id,
+            actor_type="ADMIN",
+            action="DEVICE_USAGE_IMPORTED",
+            target_type="DEVICE_CYCLE_LEDGER",
+            target_id=str(ledger.id),
+            result=ledger.quality,
+            parameters_summary={
+                "cycle_id": cycle.id,
+                "association_id": association.id,
+                "device_id": association.device_id,
+                "baseline_total_usd": str(baseline),
+                "imported_used_usd": str(imported),
+                "sampled_at": ensure_utc(snapshot.sampled_at).isoformat(),
+            },
+        )
+        return self._result(ledger, segment)
+
     async def _association_hint(self, association_id: int) -> _AssociationHint:
         async with self.session_factory() as session:
             association = await session.get(DeviceAssociation, association_id)
@@ -338,6 +483,7 @@ class DeviceLedgerService:
                 latest_total_usd=None,
                 latest_sampled_at=None,
                 confirmed_used_usd=None,
+                imported_used_usd=None,
                 quality="UNKNOWN",
             )
             session.add(segment)
@@ -610,6 +756,11 @@ class DeviceLedgerService:
             if segment.confirmed_used_usd is not None
             else None
         )
+        imported = (
+            self._stored_money(segment.imported_used_usd)
+            if segment.imported_used_usd is not None
+            else _ZERO
+        )
         baseline = (
             self._stored_money(segment.baseline_total_usd)
             if segment.baseline_total_usd is not None
@@ -626,7 +777,7 @@ class DeviceLedgerService:
             segment.quality = "NEEDS_REVIEW"
             return True
 
-        candidate = total - baseline
+        candidate = imported + total - baseline
         if candidate < 0 or (previous is not None and candidate < previous):
             segment.quality = "NEEDS_REVIEW"
             return True
@@ -634,8 +785,8 @@ class DeviceLedgerService:
         if previous is None or candidate > previous:
             segment.confirmed_used_usd = candidate
 
-        verified_zero_origin = baseline == _ZERO and zero_origin
-        if segment.quality != "NEEDS_REVIEW" and verified_zero_origin:
+        verified_origin = segment.imported_used_usd is not None or (baseline == _ZERO and zero_origin)
+        if segment.quality != "NEEDS_REVIEW" and verified_origin:
             segment.quality = "VERIFIED"
         elif segment.quality != "NEEDS_REVIEW":
             segment.quality = "NEEDS_REVIEW"

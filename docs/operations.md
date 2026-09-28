@@ -45,6 +45,15 @@ and usage sampling loop; `/startstats` resumes it. With statistics stopped, old 
 are not treated as fresh evidence. Sampling failures stay pending and are retried without
 an age cutoff or conversion to zero.
 
+The device loop waits five minutes between rounds. A normal round fetches `/me` once
+and usage once per active device (four devices means about five requests per five
+minutes, excluding retries and manual commands). Authorization still checks `/me`
+immediately. Initial authorization and pre-revoke samples remain immediate; confirmed
+revocation schedules one follow-up at one hour, executed by the first due polling round.
+Pending older staged follow-ups are consolidated into that schedule; completed history
+is retained. Failed requests retain the normal retry policy. Quota enforcement also
+runs on this five-minute loop, so it is not an instantaneous spending cutoff.
+
 The task's write state and `RecoveryGate.write_enabled` both guard automatic quota revoke.
 Manual `/deauth` and `/deauthuser` do not depend on the automatic write latch. Manual
 `/auth` still requires current task scope and verified quota evidence. Admin

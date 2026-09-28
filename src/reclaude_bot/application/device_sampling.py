@@ -25,14 +25,8 @@ log = structlog.get_logger(__name__)
 
 SamplingCallback = Callable[[int], Awaitable[object]]
 _CALLBACK_TIMEOUT_SECONDS = 35.0
-_AFTER_REVOKE_DELAYS = (
-    (2, 0),
-    (3, 60),
-    (4, 300),
-    (5, 1800),
-    (6, 7200),
-    (7, 86400),
-)
+_AFTER_REVOKE_SEQUENCE = 7
+_AFTER_REVOKE_DELAY_SECONDS = 3600
 _ACTIVE_STATES = frozenset({"ACTIVE", "PENDING_REVOKE", "UNKNOWN"})
 _METERING_STATES = frozenset({"ACTIVE", "PENDING_REVOKE", "UNKNOWN", "ENDED"})
 _MAX_LIMIT = 500
@@ -80,7 +74,7 @@ class DeviceSamplingService:
         org_id: int,
         *,
         clock: Callable[[], datetime] = utcnow,
-        poll_seconds: int | float = 60,
+        poll_seconds: int | float = 300,
         operation_timeout_seconds: int | float = 35,
     ) -> None:
         if isinstance(org_id, bool) or not isinstance(org_id, int) or org_id <= 0:
@@ -110,18 +104,7 @@ class DeviceSamplingService:
             ended_at = await self._confirmed_ended_at(association_id)
             if ended_at is None:
                 raise EligibilityError("设备关联没有已确认的撤销结果")
-            immediate_job_id: int | None = None
-            for sequence, delay_seconds in _AFTER_REVOKE_DELAYS:
-                job_id = await self.metering.enqueue(
-                    association_id,
-                    sequence=sequence,
-                    run_after=ended_at + timedelta(seconds=delay_seconds),
-                )
-                if sequence == 2:
-                    immediate_job_id = job_id
-            if immediate_job_id is None:
-                raise EligibilityError("撤销后采样任务计划无效")
-            return await self.metering.run_job(immediate_job_id)
+            return await self._schedule_after_revoke(association_id, ended_at)
 
     async def tick(self, limit: int = 50) -> tuple[object, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > _MAX_LIMIT:
@@ -130,23 +113,16 @@ class DeviceSamplingService:
         associations, jobs = await self._tick_state()
         for association in associations:
             association_jobs = jobs.get(association.association_id, ())
+            if association.state == "ENDED":
+                if association.revoke_confirmed and association.ended_at is not None:
+                    await self._schedule_after_revoke(association.association_id, association.ended_at)
+                continue
+
             sequences = {job.sequence for job in association_jobs}
             missing_initial = 0 not in sequences
             if missing_initial:
                 await self._enqueue_from_tick(association.association_id, sequence=0, run_after=now)
                 association_jobs = (*association_jobs, _JobState(0, "PENDING", now))
-
-            if association.state == "ENDED":
-                if association.revoke_confirmed:
-                    ended_at = association.ended_at
-                    if ended_at is not None:
-                        for sequence, delay_seconds in _AFTER_REVOKE_DELAYS:
-                            await self._enqueue_from_tick(
-                                association.association_id,
-                                sequence=sequence,
-                                run_after=ended_at + timedelta(seconds=delay_seconds),
-                            )
-                continue
 
             if association.state not in _ACTIVE_STATES or missing_initial:
                 continue
@@ -160,6 +136,99 @@ class DeviceSamplingService:
             await self._enqueue_from_tick(association.association_id, sequence=sequence, run_after=now)
 
         return await self.metering.run_due(limit=limit)
+
+    async def _schedule_after_revoke(self, association_id: int, expected_ended_at: datetime) -> int:
+        async with self.session_factory() as session:
+            async with session.begin():
+                association = await session.scalar(
+                    select(DeviceAssociation)
+                    .join(DeviceTaskScope, DeviceTaskScope.task_id == DeviceAssociation.task_id)
+                    .where(
+                        DeviceAssociation.id == association_id,
+                        DeviceAssociation.org_id == self.org_id,
+                        DeviceTaskScope.org_id == self.org_id,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    association is None
+                    or association.state != "ENDED"
+                    or association.ended_at is None
+                    or association.device_id is None
+                    or ensure_utc(association.ended_at) != ensure_utc(expected_ended_at)
+                ):
+                    raise EligibilityError("设备关联撤销状态在排期期间发生变化")
+
+                confirmed_revoke = await session.scalar(
+                    select(DeviceAction.id)
+                    .where(
+                        DeviceAction.association_id == association.id,
+                        DeviceAction.kind == "REVOKE",
+                        DeviceAction.status == "SUCCEEDED",
+                        DeviceAction.target_device_id == association.device_id,
+                        DeviceAction.completed_at.is_not(None),
+                        DeviceAction.completed_at <= association.ended_at,
+                    )
+                    .limit(1)
+                )
+                successful_auth = await session.scalar(
+                    select(DeviceAction.id)
+                    .where(
+                        DeviceAction.association_id == association.id,
+                        DeviceAction.kind == "AUTH",
+                        DeviceAction.status == "SUCCEEDED",
+                        DeviceAction.target_device_id == association.device_id,
+                    )
+                    .limit(1)
+                )
+                if confirmed_revoke is None or successful_auth is None:
+                    raise EligibilityError("设备关联缺少已确认的授权和撤销结果")
+
+                now = self._now()
+                jobs = list(
+                    (
+                        await session.scalars(
+                            select(DeviceResampleJob)
+                            .where(DeviceResampleJob.association_id == association.id)
+                            .order_by(DeviceResampleJob.sequence)
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                for job in jobs:
+                    if 2 <= job.sequence <= 6 and job.status == "PENDING":
+                        job.status = "CANCELLED"
+                        job.completed_at = now
+                        job.last_error_code = "post_revoke_schedule_retired"
+                        job.updated_at = now
+
+                after_revoke = next(
+                    (job for job in jobs if job.sequence == _AFTER_REVOKE_SEQUENCE),
+                    None,
+                )
+                if after_revoke is None:
+                    after_revoke = DeviceResampleJob(
+                        association_id=association.id,
+                        sequence=_AFTER_REVOKE_SEQUENCE,
+                        run_after=ensure_utc(association.ended_at)
+                        + timedelta(seconds=_AFTER_REVOKE_DELAY_SECONDS),
+                        status="PENDING",
+                        attempt_count=0,
+                        last_error_code=None,
+                        created_at=now,
+                        updated_at=now,
+                        completed_at=None,
+                    )
+                    session.add(after_revoke)
+                    await session.flush()
+                elif after_revoke.status == "PENDING" and after_revoke.attempt_count == 0:
+                    run_after = ensure_utc(association.ended_at) + timedelta(
+                        seconds=_AFTER_REVOKE_DELAY_SECONDS
+                    )
+                    if ensure_utc(after_revoke.run_after) != run_after:
+                        after_revoke.run_after = run_after
+                        after_revoke.updated_at = now
+                return after_revoke.id
 
     async def _confirmed_ended_at(self, association_id: int) -> datetime | None:
         async with self.session_factory() as session:

@@ -160,16 +160,17 @@ class BackgroundJobs:
         }
 
     async def _loop(self) -> None:
+        poll_interval = self.device_sampling.poll_seconds if self.device_sampling is not None else 60
         while not self._shutdown.is_set() and not self._quota_stop.is_set():
             try:
                 await self._run_tick()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # _run_tick records and logs failures; keep the 60-second loop alive.
+                # _run_tick records and logs failures; keep the loop alive.
                 pass
             try:
-                await asyncio.wait_for(self._quota_stop.wait(), timeout=60)
+                await asyncio.wait_for(self._quota_stop.wait(), timeout=poll_interval)
             except TimeoutError:
                 pass
 

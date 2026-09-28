@@ -13,7 +13,7 @@ def setup_jobs():
     old_actions = SimpleNamespace(reconcile_cached=AsyncMock(side_effect=AssertionError("legacy actions called")))
     task = SimpleNamespace(sync_enabled=AsyncMock(return_value=True), stop=AsyncMock(return_value=True))
     cycle = SimpleNamespace(sync=AsyncMock())
-    sampling = SimpleNamespace(tick=AsyncMock(return_value=("sample",)))
+    sampling = SimpleNamespace(tick=AsyncMock(return_value=("sample",)), poll_seconds=300)
     actions = SimpleNamespace(run_once=AsyncMock(return_value=2))
     jobs = BackgroundJobs(old_quota, old_actions, task_service=task, device_cycle=cycle,
                           device_sampling=sampling, device_actions=actions)
@@ -109,3 +109,21 @@ def test_partial_device_runtime_is_rejected_instead_of_legacy_fallback(provided)
     kwargs = {"device_" + provided: SimpleNamespace()}
     with pytest.raises(ValueError):
         BackgroundJobs(SimpleNamespace(), SimpleNamespace(), **kwargs)
+
+
+@pytest.mark.parametrize("device_mode,expected_interval", [(True, 300), (False, 60)])
+async def test_loop_waits_full_interval_and_remains_stoppable(monkeypatch, device_mode, expected_interval):
+    jobs = setup_jobs()[0] if device_mode else BackgroundJobs(SimpleNamespace(), SimpleNamespace())
+    tick = AsyncMock(return_value=0)
+    monkeypatch.setattr(jobs, "_run_tick", tick)
+    intervals = []
+
+    async def wait(awaitable, *, timeout):
+        intervals.append(timeout)
+        jobs._quota_stop.set()
+        return await awaitable
+
+    monkeypatch.setattr("reclaude_bot.jobs.scheduler.asyncio.wait_for", wait)
+    await jobs._loop()
+    tick.assert_awaited_once()
+    assert intervals == [expected_interval]

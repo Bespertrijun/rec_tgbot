@@ -165,20 +165,28 @@ async def test_revoke_samples_after_reservation_then_schedules_durable_history(l
     stack.gateway.revoke_device.side_effect = revoke
     result = await stack.revoke.deauth(1)
     assert result.status == "SUCCEEDED"
-    assert trace == ["pre", "revoke", "post"]
+    assert trace == ["pre", "revoke"]
     rows = {row.sequence: row for row in await jobs(factory)}
-    assert set(rows) == set(range(1, 8))
-    assert rows[1].status == rows[2].status == "COMPLETED"
-    for sequence, seconds in zip(range(3, 8), (60, 300, 1800, 7200, 86400), strict=True):
-        assert rows[sequence].run_after == stack.clock[0] + timedelta(seconds=seconds)
-        assert rows[sequence].status == "PENDING"
-    assert (await ledger_rows(factory))[0].confirmed_used_usd == Decimal("30")
+    assert set(rows) == {1, 7}
+    assert rows[1].status == "COMPLETED"
+    due = stack.clock[0] + timedelta(hours=1)
+    assert rows[7].status == "PENDING" and rows[7].run_after == due
+    assert (await ledger_rows(factory))[0].confirmed_used_usd == Decimal("25")
     await stack.sampling.after_revoked(association_id)
-    assert len(await jobs(factory)) == 7
+    assert len(await jobs(factory)) == 2
+    stack.clock[0] = due - timedelta(seconds=1)
+    await stack.sampling.tick()
+    assert trace == ["pre", "revoke"]
+    stack.clock[0] = due
+    await stack.sampling.tick()
+    assert trace == ["pre", "revoke", "post"]
+    assert (await ledger_rows(factory))[0].confirmed_used_usd == Decimal("30")
+    stack.clock[0] += timedelta(days=2)
+    await stack.sampling.tick()
     assert trace == ["pre", "revoke", "post"]
 
 
-async def test_failed_pre_and_post_sample_do_not_block_revoke_or_erase_history(lifecycle_db):
+async def test_failed_pre_sample_does_not_block_revoke_or_erase_history(lifecycle_db):
     factory, _ = lifecycle_db
     await cycle(factory)
     stack = wired(factory)
@@ -192,8 +200,9 @@ async def test_failed_pre_and_post_sample_do_not_block_revoke_or_erase_history(l
         assert (await session.get(DeviceAssociation, result.association_id)).state == "ENDED"
     assert (await ledger_rows(factory))[0].confirmed_used_usd == Decimal("25")
     rows = {row.sequence: row for row in await jobs(factory)}
-    assert set(range(1, 8)).issubset(rows)
-    assert rows[1].status == rows[2].status == "PENDING"
+    assert set(rows) == {0, 1, 7}
+    assert rows[1].status == rows[7].status == "PENDING"
+    assert rows[7].run_after == stack.clock[0] + timedelta(hours=1)
 
 
 async def test_timed_out_sampling_cannot_hold_revoke_forever(lifecycle_db):
@@ -226,7 +235,7 @@ async def test_revoke_unknown_waits_for_reconciliation_before_post_schedule(life
     stack.gateway.list_devices.return_value = []
     result = await stack.revoke.reconcile_revoke(unknown.action_id)
     assert result.status == "SUCCEEDED"
-    assert set(range(1, 8)).issubset({row.sequence for row in await jobs(factory)})
+    assert {row.sequence for row in await jobs(factory)} == {1, 7}
     stack.gateway.revoke_device.assert_awaited_once()
 
 
@@ -236,12 +245,12 @@ async def test_recovery_schedules_ended_devices_from_local_history_and_preserves
     association_id = await association(factory)
     await end_association(factory, association_id, at=NOW + timedelta(minutes=1))
     stack = wired(factory)
-    stack.clock[0] = NOW + timedelta(hours=2)
+    stack.clock[0] = NOW + timedelta(minutes=30)
     await stack.sampling.tick(limit=1)
     before = {row.sequence: (row.id, row.run_after) for row in await jobs(factory) if row.sequence in range(2, 8)}
-    assert len(before) == 6
+    assert len(before) == 1
     future_id, due = before[7]
-    assert due == NOW + timedelta(minutes=1, days=1)
+    assert due == NOW + timedelta(minutes=1, hours=1)
     stack.clock[0] += timedelta(minutes=1)
     restarted = DeviceSamplingService(factory, stack.metering, 178, clock=lambda: stack.clock[0])
     await restarted.tick(limit=1)
@@ -258,7 +267,10 @@ async def test_tick_coalesces_active_polling_and_works_while_task_stopped(lifecy
     await stack.auth.auth(1, LINK)
     await stack.sampling.tick()
     assert len(await jobs(factory)) == 1
-    stack.clock[0] += timedelta(seconds=60)
+    stack.clock[0] += timedelta(seconds=299)
+    await stack.sampling.tick()
+    assert stack.gateway.device_usage.await_count == 1
+    stack.clock[0] += timedelta(seconds=1)
     await asyncio.wait_for(asyncio.gather(stack.sampling.tick(), stack.sampling.tick()), 20)
     rows = await jobs(factory)
     assert len(rows) == 2 and rows[-1].sequence >= 8
@@ -361,3 +373,59 @@ async def test_cancel_after_approval_preserves_device_and_tick_recovers_sampling
     assert (await jobs(factory))[0].status == "COMPLETED"
     stack.gateway.approve_device_auth.assert_awaited_once()
     stack.gateway.revoke_device.assert_not_called()
+
+
+@pytest.mark.parametrize("completed_final", [False, True])
+async def test_old_revoke_queue_is_reduced_without_replaying_completed_history(lifecycle_db, completed_final):
+    factory, _ = lifecycle_db
+    await cycle(factory)
+    association_id = await association(factory)
+    ended_at = NOW + timedelta(minutes=1)
+    await end_association(factory, association_id, at=ended_at)
+    stack = wired(factory)
+    for sequence, delay in zip(range(2, 8), (0, 60, 300, 1800, 7200, 86400), strict=True):
+        await stack.metering.enqueue(association_id, sequence=sequence, run_after=ended_at + timedelta(seconds=delay))
+    async with factory.begin() as session:
+        rows = list((await session.scalars(select(DeviceResampleJob))).all())
+        for row in rows:
+            if row.sequence == 2 or (row.sequence == 7 and completed_final):
+                row.status = "COMPLETED"
+                row.completed_at = ended_at
+    stack.clock[0] = ended_at + timedelta(minutes=30)
+    await stack.sampling.tick()
+    stack.gateway.device_usage.assert_not_called()
+    rows = {row.sequence: row for row in await jobs(factory)}
+    assert set(rows) == set(range(2, 8))
+    assert rows[2].status == "COMPLETED"
+    assert all(rows[n].status == "CANCELLED" for n in range(3, 7))
+    assert rows[7].status == ("COMPLETED" if completed_final else "PENDING")
+    if not completed_final:
+        assert rows[7].run_after == ended_at + timedelta(hours=1)
+    stack.clock[0] = ended_at + timedelta(hours=1)
+    await stack.sampling.tick()
+    assert stack.gateway.device_usage.await_count == (0 if completed_final else 1)
+
+
+async def test_hour_followup_failure_retries_same_job_without_resetting_retry_time(lifecycle_db):
+    factory, _ = lifecycle_db
+    await cycle(factory)
+    association_id = await association(factory)
+    ended_at = NOW + timedelta(minutes=1)
+    await end_association(factory, association_id, at=ended_at)
+    stack = wired(factory)
+    await stack.sampling.after_revoked(association_id)
+    stack.clock[0] = ended_at + timedelta(hours=1)
+    stack.gateway.device_usage.side_effect = RuntimeError("unavailable")
+    await stack.sampling.tick()
+    row = (await jobs(factory))[0]
+    assert row.sequence == 7 and row.status == "PENDING" and row.attempt_count == 1
+    due = row.run_after
+    calls = stack.gateway.device_usage.await_count
+    await stack.sampling.tick()
+    assert stack.gateway.device_usage.await_count == calls
+    assert (await jobs(factory))[0].run_after == due
+    stack.clock[0] = due
+    stack.gateway.device_usage.side_effect = None
+    await stack.sampling.tick()
+    rows = await jobs(factory)
+    assert len(rows) == 1 and rows[0].status == "COMPLETED"

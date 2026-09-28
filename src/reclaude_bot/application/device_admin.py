@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -435,25 +435,27 @@ class DeviceAdminService:
                             .order_by(DeviceAssociation.device_id, DeviceAssociation.id)
                         )
                     ).all()
-                    for association, user in rows:
-                        if association.device_id in owners:
+                    for linked_association, linked_user in rows:
+                        device_id = cast(int, linked_association.device_id)
+                        if device_id in owners:
                             raise EligibilityError("本地设备关联状态不一致，无法确定当前用户")
-                        owners[association.device_id] = (association, user)
+                        owners[device_id] = (linked_association, linked_user)
 
         entries: list[DeviceListEntry] = []
         for record in local_records:
             owner = owners.get(record.id)
-            association, user = owner if owner is not None else (None, None)
+            owner_association = owner[0] if owner is not None else None
+            owner_user = owner[1] if owner is not None else None
             entries.append(
                 DeviceListEntry(
                     device_id=record.id,
                     org_id=record.org_id,
                     name=record.name,
                     revoked_at=record.revoked_at,
-                    owner_user_id=user.id if user is not None else None,
-                    owner_email=user.email if user is not None else None,
-                    association_id=association.id if association is not None else None,
-                    association_state=association.state if association is not None else None,
+                    owner_user_id=owner_user.id if owner_user is not None else None,
+                    owner_email=owner_user.email if owner_user is not None else None,
+                    association_id=owner_association.id if owner_association is not None else None,
+                    association_state=owner_association.state if owner_association is not None else None,
                 )
             )
         entries.sort(key=lambda item: item.device_id)

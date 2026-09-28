@@ -5,7 +5,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import structlog
 from sqlalchemy import select
@@ -270,7 +270,7 @@ class DeviceMeteringService:
                 if job.status != "PENDING":
                     return None, DeviceMeteringResult(
                         job_id=job.id,
-                        status=job.status,
+                        status=cast(Literal["PENDING", "COMPLETED", "CANCELLED"], job.status),
                         snapshot_id=None,
                         error_code=job.last_error_code,
                     )
@@ -518,7 +518,7 @@ class DeviceMeteringService:
                     )
                 job = found[0]
                 if job.status != "PENDING" or job.attempt_count != claim.attempt:
-                    status = job.status
+                    status = cast(Literal["PENDING", "COMPLETED", "CANCELLED"], job.status)
                     return DeviceMeteringResult(
                         claim.job_id,
                         status,
@@ -550,7 +550,7 @@ class DeviceMeteringService:
                 if job.status != "PENDING" or job.attempt_count != claim.attempt:
                     return DeviceMeteringResult(
                         claim.job_id,
-                        job.status,
+                        cast(Literal["PENDING", "COMPLETED", "CANCELLED"], job.status),
                         None,
                         None if job.status != "PENDING" else "lease_lost",
                     )

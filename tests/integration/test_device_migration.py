@@ -426,7 +426,8 @@ async def save_auth_result(url, reused):
 @pytest.mark.parametrize("reused", [True, False])
 def test_auth_result_downgrade_never_discards_approval_evidence(migration_url, reused):
     config = config_for(migration_url)
-    command.upgrade(config, "head")
+    # Test the 0014 guard itself, not rollback of later revisions' DDL.
+    command.upgrade(config, "0014_device_auth_result")
     asyncio.run(inspect_database(migration_url, seed=True, populate="action"))
     asyncio.run(save_auth_result(migration_url, reused))
     before = asyncio.run(inspect_database(migration_url))

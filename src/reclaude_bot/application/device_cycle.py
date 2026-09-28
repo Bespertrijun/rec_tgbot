@@ -85,7 +85,11 @@ class DeviceCycleService:
                         if ensure_utc(latest.last_day_checked_at) > request_started_at:
                             return latest
 
-                    if latest is not None and evidence.reset_at == ensure_utc(latest.reset_at):
+                    if (
+                        latest is not None
+                        and ensure_utc(evidence.reset_at).replace(microsecond=0)
+                        == ensure_utc(latest.reset_at).replace(microsecond=0)
+                    ):
                         if latest.account_id != evidence.account_id:
                             latest.status = CycleStatus.NEEDS_REVIEW.value
                             latest.last_day_allow = False

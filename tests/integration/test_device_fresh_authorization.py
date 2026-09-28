@@ -123,3 +123,21 @@ async def test_repeat_successful_auth_never_repeats_approval(lifecycle_db):
     assert result.status == "SUCCEEDED"
     assert await runtime.auth.auth(1, LINK) == result
     runtime.gateway.approve_device_auth.assert_awaited_once()
+
+
+@pytest.mark.parametrize("method", ["self", "admin"])
+async def test_authorization_recovers_cycle_marked_for_fractional_reset_drift(lifecycle_db, method):
+    factory, _ = lifecycle_db
+    reset = (NOW + timedelta(days=6)).replace(microsecond=555729)
+    cycle_id = await ready_cycle(factory, reset=reset)
+    async with factory.begin() as session:
+        cycle = await session.get(DeviceQuotaCycle, cycle_id)
+        cycle.status = "NEEDS_REVIEW"
+        cycle.weekly_percent = None
+    runtime = wired(factory, fresh=snapshot(reset=reset.replace(microsecond=541290)))
+    assert (await authorize(runtime, method)).status == "SUCCEEDED"
+    runtime.source.get_usage.assert_awaited_once_with(178)
+    async with factory() as session:
+        cycle = await session.get(DeviceQuotaCycle, cycle_id)
+        assert cycle.status == "VERIFIED" and cycle.reset_at == reset
+        assert len((await session.scalars(select(DeviceQuotaCycle))).all()) == 1

@@ -6,13 +6,13 @@ from sqlalchemy import select
 
 from reclaude_bot.application.actions import QuotaActionService
 from reclaude_bot.application.admin import AdminService
-from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.domain.enums import QuotaRevocationStatus
 from reclaude_bot.infrastructure.db.models import AuditLog, QuotaRevocation, ServiceState, UsageNotification
 from reclaude_bot.infrastructure.reclaude.models import Member
 from reclaude_bot.jobs.usage_poll import poll_once
+from tests.fixtures.legacy_users import LegacyMemberUserFixture
 
 
 async def seed(app_context, *, account_id: int | None = 4949, total: str = "0"):
@@ -23,7 +23,7 @@ async def seed(app_context, *, account_id: int | None = 4949, total: str = "0"):
     now = datetime(2026, 8, 18, tzinfo=UTC)
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     user = await binding.bind(200, "one@example.com")
     actions = QuotaActionService(factory, gateway, quota, settings)
     task = QuotaTaskService(factory, gateway)

@@ -6,9 +6,20 @@ from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from reclaude_bot.application.actions import QuotaActionService
+from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActionService
 from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
+from reclaude_bot.application.device import DeviceAuthorizationService
+from reclaude_bot.application.device_admin import DeviceAdminService
+from reclaude_bot.application.device_context import SingleOrgAccountSource
+from reclaude_bot.application.device_cycle import DeviceCycleService
+from reclaude_bot.application.device_ledger import DeviceLedgerService
+from reclaude_bot.application.device_metering import DeviceMeteringService
+from reclaude_bot.application.device_quota import DeviceQuotaService
+from reclaude_bot.application.device_revocation import DeviceRevocationService
+from reclaude_bot.application.device_sampling import DeviceSamplingService
+from reclaude_bot.application.device_task_members import DeviceTaskMemberService
+from reclaude_bot.application.device_usage import DeviceUsageCollector
 from reclaude_bot.application.groups import GroupService
 from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.quota import QuotaService
@@ -77,9 +88,69 @@ async def run() -> None:
     binding = BindingService(session_factory, gateway, settings.bind_attempts_per_hour, gate=gate, onboarding=onboarding)
     recovery = RecoveryService(gate, quota, gateway, settings)
     await recovery.restore_persisted_account(startup_state)
-    task = QuotaTaskService(session_factory, gateway)
-    admin = AdminService(session_factory, quota, actions, task)
-    jobs = BackgroundJobs(quota, actions, onboarding_worker, task_service=task)
+    task = QuotaTaskService(session_factory, gateway, org_id=settings.reclaude_org_id)
+    device_quota = DeviceQuotaService(session_factory, settings.reclaude_org_id)
+    device_cycle = DeviceCycleService(
+        session_factory,
+        SingleOrgAccountSource(gateway, settings.reclaude_org_id),
+        settings.reclaude_org_id,
+    )
+    device_collector = DeviceUsageCollector(session_factory, gateway, settings.reclaude_org_id)
+    device_ledger = DeviceLedgerService(session_factory, settings.reclaude_org_id)
+    device_metering = DeviceMeteringService(
+        session_factory,
+        device_collector,
+        device_ledger,
+        settings.reclaude_org_id,
+        timeout_seconds=settings.api_timeout_seconds,
+    )
+    device_sampling = DeviceSamplingService(
+        session_factory,
+        device_metering,
+        settings.reclaude_org_id,
+    )
+    device_revocation = DeviceRevocationService(
+        session_factory,
+        gateway,
+        settings.reclaude_org_id,
+        before_revoke=device_sampling.before_revoke,
+        after_revoked=device_sampling.after_revoked,
+    )
+    device_quota_actions = DeviceQuotaActionService(
+        session_factory,
+        device_quota,
+        device_revocation,
+        user_notify_callback=user_notify,
+        alert_callback=operational_alert,
+        gate=gate,
+    )
+    device_authorization = DeviceAuthorizationService(
+        session_factory,
+        gateway,
+        settings.reclaude_org_id,
+        device_quota.quota_check,
+        on_authorized=device_sampling.after_authorized,
+        before_authorize=device_cycle.sync,
+    )
+    device_admin = DeviceAdminService(
+        session_factory,
+        gateway,
+        settings.reclaude_org_id,
+        device_quota.quota_check,
+        on_authorized=device_sampling.after_authorized,
+        before_authorize=device_cycle.sync,
+    )
+    device_task_members = DeviceTaskMemberService(session_factory, settings.reclaude_org_id)
+    admin = AdminService(session_factory, quota, task=task)
+    jobs = BackgroundJobs(
+        quota,
+        actions,
+        onboarding_worker,
+        task_service=task,
+        device_cycle=device_cycle,
+        device_sampling=device_sampling,
+        device_actions=device_quota_actions,
+    )
     updater = UpdateService(settings)
     dp = Dispatcher()
     dp["binding"] = binding
@@ -89,6 +160,13 @@ async def run() -> None:
     dp["task"] = task
     dp["jobs"] = jobs
     dp["admin"] = admin
+    dp["device_quota"] = device_quota
+    dp["device_cycle"] = device_cycle
+    dp["device_sampling"] = device_sampling
+    dp["device_auth"] = device_authorization
+    dp["device_admin"] = device_admin
+    dp["device_revocation"] = device_revocation
+    dp["device_task_members"] = device_task_members
     dp["groups"] = groups
     dp["onboarding"] = onboarding
     dp["onboarding_worker"] = onboarding_worker

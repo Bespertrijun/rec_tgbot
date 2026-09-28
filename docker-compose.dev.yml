@@ -1,3 +1,5 @@
+name: reclaude-device-dev
+
 services:
   db:
     image: postgres:16-alpine
@@ -6,7 +8,7 @@ services:
       POSTGRES_USER: bot
       POSTGRES_PASSWORD: bot
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - device-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bot -d reclaude"]
       interval: 5s
@@ -23,10 +25,10 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - reclaude-cookies:/var/lib/reclaude-bot/cookies
-      - reclaude-logs:/var/lib/reclaude-bot/logs
+      - device-cookies:/var/lib/reclaude-bot/cookies
+      - device-logs:/var/lib/reclaude-bot/logs
     restart: unless-stopped
 volumes:
-  postgres-data:
-  reclaude-cookies:
-  reclaude-logs:
+  device-postgres-data:
+  device-cookies:
+  device-logs:

@@ -3,25 +3,35 @@ from __future__ import annotations
 import html
 import traceback
 from collections.abc import Iterable
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import structlog
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, MessageEntity
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.admin import AdminService
-from reclaude_bot.application.binding import BindingService, masked_email
+from reclaude_bot.application.audit import utcnow
+from reclaude_bot.application.binding import BindingService, masked_email, normalize_email
+from reclaude_bot.application.device import DeviceAuthorizationService
+from reclaude_bot.application.device_admin import DeviceAdminService
+from reclaude_bot.application.device_cycle import DeviceCycleService
+from reclaude_bot.application.device_quota import DeviceQuotaService
+from reclaude_bot.application.device_revocation import DeviceRevocationService
+from reclaude_bot.application.device_sampling import DeviceSamplingService
+from reclaude_bot.application.device_task_members import DeviceTaskMemberService
 from reclaude_bot.application.onboarding import OnboardingService
-from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryService
 from reclaude_bot.application.task import ALLOWLIST, EXCLUDE, QuotaTaskService
 from reclaude_bot.application.updater import UpdateError, UpdateService
 from reclaude_bot.bot.middleware import GroupAccessMiddleware
 from reclaude_bot.config import Settings
-from reclaude_bot.domain.errors import DomainError
-from reclaude_bot.infrastructure.db.models import UpstreamMember
+from reclaude_bot.domain.errors import DomainError, EligibilityError
+from reclaude_bot.domain.timefmt import format_beijing
+from reclaude_bot.infrastructure.db.models import User
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord
 from reclaude_bot.jobs.scheduler import BackgroundJobs
 
@@ -85,38 +95,118 @@ def build_router(settings: Settings) -> Router:
             else:
                 await message.answer(f"绑定成功：{html.escape(user.email)}")
         except (DomainError, ValueError):
-            await message.answer("绑定失败：请确认已完成首次成员同步、邮箱存在且未被占用。")
+            await message.answer("绑定失败：请确认在私聊中操作、邮箱格式正确且未被占用；账号受限请联系管理员。")
 
     @router.message(Command("status"))
-    async def status(message: Message, quota: QuotaService) -> None:
+    async def status(message: Message, device_quota: DeviceQuotaService) -> None:
         try:
             if message.from_user is None:
                 return
-            await _record_username_safely(quota, message.from_user.id, message.from_user.username)
-            value = await quota.get_status(message.from_user.id)
-            email = str(value["email"])
+            await _record_username_safely_from_store(device_quota.session_factory, message.from_user.id, message.from_user.username)
+            local_user = await _find_local_user(device_quota.session_factory, telegram_user_id=message.from_user.id)
+            if local_user is None:
+                await message.answer("你还没有绑定账号，请先私聊 Bot 使用 /bind 邮箱。")
+                return
+            value = await device_quota.status(local_user[0])
+            email = local_user[1]
             local, _, domain = email.partition("@")
+            if value.association_state == "UNKNOWN" and value.pending_action_kind == "AUTH":
+                auth_state = "授权结果待核对（请勿重发链接）"
+            elif value.association_state == "UNKNOWN" and value.pending_action_kind == "REVOKE":
+                auth_state = "撤销结果待核对"
+            elif value.association_state == "UNKNOWN":
+                auth_state = "设备关联状态待核对"
+            elif value.association_state == "PENDING_AUTH":
+                auth_state = "授权处理中"
+            elif value.association_state == "PENDING_REVOKE":
+                auth_state = "撤销处理中"
+            elif value.association_state == "ACTIVE":
+                auth_state = "已授权"
+            else:
+                auth_state = "未关联"
+            if value.association_state == "ACTIVE" and value.last_sampled_at is None:
+                used = "首采待同步"
+            else:
+                used = f"${value.used_usd:.2f}" if value.used_usd is not None else "待同步"
+            device = (
+                str(value.device_id)
+                if value.device_id is not None
+                else "待核对"
+                if value.association_state in {"PENDING_AUTH", "UNKNOWN"}
+                else "无"
+            )
+            limit = f"${value.effective_limit_usd:.2f}" if value.effective_limit_usd is not None else "未知"
+            remaining = f"${value.remaining_usd:.2f}" if value.remaining_usd is not None else "未知"
             await message.answer(
                 f"邮箱：{(local[:1] or '*')}***@{domain}\n"
-                f"本周期已用：${value['used_usd']:.2f}\n"
-                f"当前额度：${value['limit_usd']:.2f}\n"
-                f"剩余额度：${value['remaining_usd']:.2f}\n"
-                f"刷新时间：{value['reset_at'].isoformat()}\n"
-                f"最后24小时：{'是' if value['last_24h'] else '否'}\n"
-                f"分配状态：{value['allocation_status']}"
+                f"授权状态：{auth_state}\n"
+                f"设备：{device}\n"
+                f"任务：{html.escape(value.task_name or '未配置')}\n"
+                f"本周期已用：{used}\n"
+                f"当前额度：{limit}\n"
+                f"剩余额度：{remaining}\n"
+                f"数据质量：{html.escape(value.quality)}\n"
+                f"额度锁定：{'是' if value.quota_locked else '否'}\n"
+                f"最近采样：{_format_datetime(value.last_sampled_at)}\n"
+                f"周期刷新：{_format_datetime(value.reset_at)}"
             )
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
 
+    @router.message(Command("auth"))
+    async def auth_device(message: Message, command: CommandObject, device_auth: DeviceAuthorizationService, device_quota: DeviceQuotaService) -> None:
+        if message.chat.type != "private" or message.from_user is None:
+            await message.answer("请在 Bot 私聊中发送 /auth 授权链接。")
+            return
+        if not command.args or not command.args.strip():
+            await message.answer("用法：/auth 授权链接")
+            return
+        try:
+            local_user = await _find_local_user(device_quota.session_factory, telegram_user_id=message.from_user.id)
+            if local_user is None:
+                raise EligibilityError("你还没有绑定账号，请先私聊 Bot 使用 /bind 邮箱")
+            result = await device_auth.auth(local_user[0], command.args.strip())
+            if result.status == "SUCCEEDED":
+                await message.answer(f"设备授权成功，设备 ID：{result.device_id}。")
+            elif result.status == "FAILED":
+                await message.answer("设备授权未成功，请重新获取新的授权链接后再试。")
+            else:
+                await message.answer("授权结果暂未确认，请等待后台核对或联系管理员；不要重发此链接。")
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+        except Exception:
+            await message.answer("设备授权暂时无法完成，请稍后重试或联系管理员核对。")
+
+    @router.message(Command("deauth"))
+    async def deauth_device(message: Message, device_revocation: DeviceRevocationService, device_quota: DeviceQuotaService) -> None:
+        if message.chat.type != "private" or message.from_user is None:
+            await message.answer("请在 Bot 私聊中使用 /deauth。")
+            return
+        try:
+            local_user = await _find_local_user(device_quota.session_factory, telegram_user_id=message.from_user.id)
+            if local_user is None:
+                raise EligibilityError("你还没有绑定账号")
+            result = await device_revocation.deauth(local_user[0])
+            if result is None:
+                await message.answer("当前没有未结束的设备关联。")
+            elif result.status == "SUCCEEDED":
+                await message.answer("设备撤销已确认。")
+            else:
+                await message.answer("设备撤销结果暂未确认，后台会继续核对；请勿重复提交。")
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+        except Exception:
+            await message.answer("设备撤销暂时无法完成，请稍后查询 /status 或联系管理员。")
+
     @router.message(Command("send"))
-    async def send(message: Message, quota: QuotaService) -> None:
+    async def send(message: Message, device_quota: DeviceQuotaService) -> None:
         if message.from_user is None:
             await message.answer("无法识别发送者：匿名管理员或频道身份不能使用 /send，请换回本人身份后重试。", skip_auto_delete=True)
             return
         if message.chat.type == "private":
             await message.answer("只能在群组中使用：请在群里 @对方 后转账。")
             return
-        await _record_username_safely(quota, message.from_user.id, message.from_user.username)
+        await _record_username_safely_from_store(device_quota.session_factory, message.from_user.id, message.from_user.username)
         entities = list(message.entities or [])
         mention = next((entity for entity in entities if entity.type in {"mention", "text_mention"}), None)
         if mention is None:
@@ -130,10 +220,28 @@ def build_router(settings: Settings) -> Router:
             await message.answer("用法：/send @对方 金额")
             return
         try:
+            sender = await _find_local_user(device_quota.session_factory, telegram_user_id=message.from_user.id)
+            if sender is None:
+                raise EligibilityError("发送前请先私聊 Bot 使用 /bind 邮箱")
             if mention.type == "text_mention" and mention.user is not None:
-                result = await quota.transfer_quota(message.from_user.id, amount=amount, recipient_telegram_id=mention.user.id)
+                recipient = await _find_local_user(device_quota.session_factory, telegram_user_id=mention.user.id)
             else:
-                result = await quota.transfer_quota(message.from_user.id, amount=amount, recipient_username=mention.extract_from(text).lstrip("@"))
+                recipient = await _find_local_user(
+                    device_quota.session_factory,
+                    username=mention.extract_from(text).lstrip("@"),
+                )
+            if recipient is None:
+                raise EligibilityError("找不到已绑定的收款用户")
+            current = await device_quota.status(sender[0])
+            if current.cycle_id is None:
+                raise EligibilityError("当前设备额度周期尚未核实，暂不能转账")
+            result = await device_quota.transfer(
+                sender[0],
+                recipient[0],
+                current.cycle_id,
+                amount,
+                operation_key=f"telegram:{message.chat.id}:{message.message_id}",
+            )
         except DomainError as exc:
             log.info("quota_transfer_rejected", sender_telegram_id=message.from_user.id, error=str(exc))
             await message.answer(html.escape(str(exc)), skip_auto_delete=True)
@@ -147,8 +255,8 @@ def build_router(settings: Settings) -> Router:
             await message.answer("转账失败，请稍后重试。", skip_auto_delete=True)
             return
         await message.answer(
-            f"已转账 ${result['amount_usd']:.2f} 给 {html.escape(masked_email(str(result['recipient_email'])))}，"
-            f"你本周期剩余额度 ${result['sender_remaining_usd']:.2f}。",
+            f"已转账 ${result.amount_usd:.2f} 给 {html.escape(masked_email(recipient[1]))}，"
+            f"你本周期剩余额度 ${result.sender_remaining_usd:.2f}。",
             skip_auto_delete=True,
         )
 
@@ -163,27 +271,36 @@ def build_admin_router(settings: Settings) -> Router:
         return message.from_user is not None and message.from_user.id in settings.telegram_admin_ids
 
     @router.message(Command("sync"))
-    async def sync(message: Message, quota: QuotaService) -> None:
+    async def sync(message: Message, device_cycle: DeviceCycleService, device_sampling: DeviceSamplingService) -> None:
         if not is_admin(message):
             return
         try:
-            await quota.ensure_cycle()
-            count = await quota.sync_members()
-            await message.answer(f"同步完成：{count} 个上游成员")
+            cycle = await device_cycle.sync()
+            samples = await device_sampling.tick()
+            percent = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
+            await message.answer(
+                f"设备周期同步完成：{cycle.status} | 账号 {html.escape(str(cycle.account_id or '未知'))} | "
+                f"周用量 {percent} | 补采任务处理 {len(samples)} 个"
+            )
         except Exception:
             await message.answer("同步失败，已记录告警。")
 
     @router.message(Command("member"))
-    async def member_list(message: Message, quota: QuotaService) -> None:
+    async def member_list(message: Message, device_quota: DeviceQuotaService) -> None:
         if not is_admin(message):
             return
         try:
-            members = await quota.list_upstream_members()
+            async with device_quota.session_factory() as session:
+                members = list((await session.scalars(select(User).order_by(User.id.asc()))).all())
             if not members:
-                await message.answer("暂无上游成员，请先执行 /sync")
+                await message.answer("暂无本地用户")
                 return
-            lines = [f"上游成员：{len(members)} 个 | 最近同步：{_format_datetime(max(member.sampled_at for member in members))}"]
-            lines.extend(f"- {html.escape(member.email)} | {html.escape(member.reclaude_user_id)}" for member in members)
+            lines = [f"本地用户：{len(members)} 个"]
+            lines.extend(
+                f"- 本地 ID {user.id} | {html.escape(user.email)} | {html.escape(user.binding_status)} | "
+                f"{html.escape(user.status)} | TG {user.telegram_user_id}"
+                for user in members
+            )
             current = ""
             for line in lines:
                 candidate = f"{current}\n{line}" if current else line
@@ -196,7 +313,7 @@ def build_admin_router(settings: Settings) -> Router:
                 await message.answer(current)
         except Exception as exc:
             log.error(
-                "upstream_member_listing_failed",
+                "local_member_listing_failed",
                 error_type=type(exc).__name__,
                 traceback="".join(traceback.format_tb(exc.__traceback__)),
             )
@@ -230,21 +347,91 @@ def build_admin_router(settings: Settings) -> Router:
         if not is_admin(message):
             return
         args = (command.args or "").split()
-        if not args or not args[0].isdigit():
-            await message.answer("用法：/unbind TelegramID [force]")
+        if len(args) != 1 or not args[0].isdigit():
+            await message.answer("用法：/unbind TelegramID；如果仍有关联设备，请先执行 /deauthuser 邮箱")
             return
         try:
-            await binding.unbind(int(args[0]), operator_telegram_id=message.from_user.id, force_revoke=len(args) > 1 and args[1] == "force")  # type: ignore[union-attr]
+            await binding.unbind(int(args[0]), operator_telegram_id=message.from_user.id, force_revoke=False)  # type: ignore[union-attr]
             await message.answer("解绑完成")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
+
+    @router.message(Command("device", "devices"))
+    async def devices(message: Message, device_admin: DeviceAdminService) -> None:
+        if not is_admin(message):
+            return
+        try:
+            entries = await device_admin.list_devices()
+            if not entries:
+                await message.answer("当前组织暂无设备")
+                return
+            lines = [f"组织设备：{len(entries)} 个"]
+            for item in entries:
+                state = "已撤销" if item.revoked_at is not None else "可用"
+                if item.owner_user_id is not None:
+                    owner = f"本地用户 {item.owner_user_id} | {html.escape(item.owner_email or '')} | {item.association_state}"
+                else:
+                    owner = "未关联"
+                lines.append(f"- {item.device_id} | {html.escape(item.name)} | {state} | {owner}")
+            await _answer_lines(message, lines)
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+        except Exception:
+            await message.answer("设备列表暂时不可用。")
+
+    @router.message(Command("authuser"))
+    async def auth_user_device(message: Message, command: CommandObject, device_admin: DeviceAdminService) -> None:
+        if not is_admin(message):
+            return
+        values = (command.args or "").split()
+        if len(values) not in {2, 3} or not values[1].isdigit():
+            await message.answer("用法：/authuser 邮箱 设备ID [任务名]")
+            return
+        try:
+            user_id = await _find_existing_user_by_email(device_admin.session_factory, values[0])
+            result = await device_admin.authuser(
+                user_id,
+                int(values[1]),
+                message.from_user.id,  # type: ignore[union-attr]
+                task_name=values[2] if len(values) == 3 else None,
+            )
+            await message.answer(f"设备关联已建立：{html.escape(masked_email(values[0]))} | 设备 {result.device_id} | 关联 {result.association_id}")
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+        except Exception:
+            await message.answer("管理员设备关联失败，请检查设备状态和本地额度。")
+
+    @router.message(Command("deauthuser"))
+    async def deauth_user_device(message: Message, command: CommandObject, device_revocation: DeviceRevocationService) -> None:
+        if not is_admin(message):
+            return
+        values = (command.args or "").split()
+        if len(values) != 1:
+            await message.answer("用法：/deauthuser 邮箱")
+            return
+        try:
+            user_id = await _find_existing_user_by_email(device_revocation.session_factory, values[0])
+            result = await device_revocation.deauth(
+                user_id,
+                operator_id=message.from_user.id,  # type: ignore[union-attr]
+            )
+            if result is None:
+                await message.answer("该用户当前没有未结束的设备关联。")
+            elif result.status == "SUCCEEDED":
+                await message.answer(f"设备撤销已确认：关联 {result.association_id}。")
+            else:
+                await message.answer(f"设备撤销结果待核对：关联 {result.association_id}，后台会继续核对。")
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+        except Exception:
+            await message.answer("管理员设备撤销暂时无法完成，请检查服务日志。")
 
     @router.message(Command("audit"))
     async def audit_view(message: Message, admin: AdminService) -> None:
         if not is_admin(message):
             return
         rows = await admin.recent_audit()
-        await message.answer("\n".join(f"{row.created_at.isoformat()} {row.action} {row.result}" for row in rows) or "暂无审计记录")
+        await message.answer("\n".join(f"{_format_datetime(row.created_at)} {row.action} {row.result}" for row in rows) or "暂无审计记录")
 
     @router.message(Command("use"))
     async def use_account(message: Message, command: CommandObject, recovery: RecoveryService) -> None:
@@ -256,7 +443,10 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             account = await recovery.select_account(account_id, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(f"已选择 Reclaude 账号 {account.account_id}，周期和成员同步完成，本周期用量已清零；换号前运行的任务已自动恢复，被移除成员将随轮询自动加回。")
+            await message.answer(
+                f"Reclaude 账号 {account.account_id} 已校验并选择。任务保持 STOPPED，写闸未开启；"
+                "设备周期和用量将由本地统计循环同步。旧余额不会在此操作中重置或迁移。"
+            )
         except DomainError as exc:
             await message.answer(f"账号选择失败：{html.escape(str(exc))}")
         except Exception:
@@ -282,7 +472,7 @@ def build_admin_router(settings: Settings) -> Router:
             return
         await message.answer(
             f"限额任务 {html.escape(snapshot.name)} 已创建：STOPPED | 范围 ALL | 每用户额度 ${snapshot.limit_usd:.2f}。\n"
-            f"使用 /addtaskmember {html.escape(snapshot.name)} &lt;reclaude_user_id&gt; 限定成员，/starttask {html.escape(snapshot.name)} 启动。"
+            f"使用 /addtaskmember {html.escape(snapshot.name)} &lt;本地用户ID&gt; 限定成员，/starttask {html.escape(snapshot.name)} 启动。"
         )
 
     @router.message(Command("deltatask"))
@@ -297,7 +487,14 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer(html.escape(str(exc)))
 
     @router.message(Command("task"))
-    async def task_status(message: Message, command: CommandObject, task: QuotaTaskService, jobs: BackgroundJobs, quota: QuotaService, recovery: RecoveryService) -> None:
+    async def task_status(
+        message: Message,
+        command: CommandObject,
+        task: QuotaTaskService,
+        jobs: BackgroundJobs,
+        device_cycle: DeviceCycleService,
+        recovery: RecoveryService,
+    ) -> None:
         if not is_admin(message):
             return
         try:
@@ -345,11 +542,12 @@ def build_admin_router(settings: Settings) -> Router:
             selected = state.selected_account_id if state is not None else None
             lines.append(f"Reclaude 账号：{html.escape(str(selected)) if selected else '未选择'}")
             lines.append(f"写闸门状态：{'开启' if state is not None and state.write_enabled else '关闭'}（{html.escape(str(state.reason)) if state is not None else 'unknown'}）")
-            cycle = await quota.current_cycle_from_now()
-            lines.append(f"当前周期：{_format_datetime(cycle.reset_at if cycle is not None else None)}")
-            async with quota.session_factory() as session:
-                last_sync = await session.scalar(select(func.max(UpstreamMember.sampled_at)))
-            lines.append(f"最近成员同步：{_format_datetime(last_sync)}")
+            cycle = await device_cycle.current(name)
+            if cycle is None:
+                lines.append("当前设备周期：尚未同步")
+            else:
+                weekly = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
+                lines.append(f"设备周期：{cycle.status} | 周用量 {weekly} | 刷新 {_format_datetime(cycle.reset_at)}")
             await message.answer("\n".join(lines))
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
@@ -357,13 +555,27 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer("任务状态暂时不可用。")
 
     @router.message(Command("taskusers"))
-    async def task_users(message: Message, command: CommandObject, task: QuotaTaskService, quota: QuotaService) -> None:
+    async def task_users(
+        message: Message,
+        command: CommandObject,
+        task: QuotaTaskService,
+        device_task_members: DeviceTaskMemberService,
+        device_quota: DeviceQuotaService,
+    ) -> None:
         if not is_admin(message) or message.chat.type != "private":
             return
         try:
             name = await task.resolve((command.args or "").strip() or None)
             snapshot = await task.snapshot(name)
-            usage = await quota.list_task_usage(scope_mode=snapshot.scope_mode, member_ids=snapshot.member_ids, limit_usd=snapshot.limit_usd)
+            members = await device_task_members.snapshot(name)
+            async with device_quota.session_factory() as session:
+                users = list(
+                    (
+                        await session.scalars(
+                            select(User).where(User.id.in_(members.covered_user_ids)).order_by(User.id.asc())
+                        )
+                    ).all()
+                ) if members.covered_user_ids else []
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
             return
@@ -375,45 +587,27 @@ def build_admin_router(settings: Settings) -> Router:
             )
             await message.answer("任务成员使用状况暂时不可用。")
             return
-        entries = usage["members"]
-        if not entries:
+        if not users:
             if snapshot.scope_mode == ALLOWLIST:
                 await message.answer(f"任务 {html.escape(snapshot.name)} 白名单为空，请使用 /addtaskmember 添加成员。")
             elif snapshot.scope_mode == EXCLUDE:
-                await message.answer(f"任务 {html.escape(snapshot.name)} 范围内暂无成员：其余成员均被排除或尚未同步。")
+                await message.answer(f"任务 {html.escape(snapshot.name)} 范围内暂无本地用户。")
             else:
-                await message.answer("任务范围内暂无成员，请先执行 /sync")
+                await message.answer("任务范围内暂无本地用户。")
             return
         lines = [
             f"任务：{html.escape(snapshot.name)} | {'RUNNING' if snapshot.enabled else 'STOPPED'} | 范围：{snapshot.scope_mode} | "
-            f"成员：{len(entries)} 个 | 任务额度 ${usage['limit_usd']:.2f} | 周期刷新：{_format_datetime(usage['reset_at'])}"
+            f"本地用户：{len(users)} 个 | 任务额度 ${snapshot.limit_usd:.2f}"
         ]
-        lines.extend(await _account_usage_lines(quota))
-        for entry in entries:
-            reclaude_user_id = html.escape(str(entry["reclaude_user_id"]))
-            if entry["missing_upstream"]:
-                lines.append(f"- {reclaude_user_id} | 成员已从上游消失")
-                continue
-            email = html.escape(str(entry["email"]))
-            if entry["telegram_user_id"] is not None:
-                identity = f"TG {entry['telegram_user_id']} | {html.escape(str(entry['user_status']))}"
-            else:
-                identity = "未绑定"
-            if entry["used_usd"] is None:
-                usage_text = "数据未同步"
-            else:
-                usage_text = f"已用 ${entry['used_usd']:.2f} | 剩余 ${entry['remaining_usd']:.2f}"
-            lines.append(f"- {email} | {reclaude_user_id} | {identity} | {usage_text}")
-        current = ""
-        for line in lines:
-            candidate = f"{current}\n{line}" if current else line
-            if current and len(candidate) > 4000:
-                await message.answer(current)
-                current = line
-            else:
-                current = candidate
-        if current:
-            await message.answer(current)
+        for user in users:
+            status = await device_quota.status(user.id, task_id=snapshot.id)
+            used = f"${status.used_usd:.2f}" if status.used_usd is not None else "待同步"
+            remaining = f"${status.remaining_usd:.2f}" if status.remaining_usd is not None else "未知"
+            lines.append(
+                f"- 本地 ID {user.id} | {html.escape(user.email)} | {user.binding_status}/{user.status} | "
+                f"设备 {status.device_id if status.device_id is not None else '无'} | 已用 {used} | 剩余 {remaining} | {status.quality}"
+            )
+        await _answer_lines(message, lines)
 
     @router.message(Command("starttask"))
     async def start_task(message: Message, command: CommandObject, task: QuotaTaskService, recovery: RecoveryService, jobs: BackgroundJobs) -> None:
@@ -473,7 +667,7 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer("停止数据统计失败，请检查服务日志。")
 
     @router.message(Command("settaskquota"))
-    async def set_task_quota(message: Message, command: CommandObject, admin: AdminService) -> None:
+    async def set_task_quota(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
         if not is_admin(message):
             return
         values = (command.args or "").split()
@@ -491,44 +685,65 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer("用法：/settaskquota &lt;任务名&gt; 金额")
             return
         try:
-            name, value = await admin.set_task_quota(name_arg, amount, message.from_user.id)  # type: ignore[union-attr]
+            name, value = await task.set_limit(name_arg, amount, message.from_user.id)  # type: ignore[union-attr]
             await message.answer(f"任务 {html.escape(name)} 每用户额度已设置为 ${value:.2f}", skip_auto_delete=True)
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
 
     @router.message(Command("addtaskmember"))
-    async def add_task_member(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
+    async def add_task_member(
+        message: Message,
+        command: CommandObject,
+        task: QuotaTaskService,
+        device_task_members: DeviceTaskMemberService,
+    ) -> None:
         if not is_admin(message):
             return
         try:
             values = (command.args or "").split()
-            name, ids = await task.resolve_members_args(values, usage="用法：/addtaskmember <任务名> <reclaude_user_id> ...（仅一个任务时可省略任务名）")
-            result = await task.add_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
-            if len(ids) == 1 and ids[0].casefold() == "all":
-                await message.answer(f"任务 {html.escape(name)} 成员范围已切回 ALL，旧成员名单已清理。")
+            name, raw_ids = await task.resolve_members_args(
+                values,
+                usage="用法：/addtaskmember <任务名> <本地用户ID> ...（仅一个任务时可省略任务名）",
+            )
+            if len(raw_ids) == 1 and raw_ids[0].casefold() == "all":
+                await device_task_members.reset_all(name, message.from_user.id)  # type: ignore[union-attr]
+                await message.answer(f"任务 {html.escape(name)} 成员范围已切回 ALL。")
+                return
+            ids = _parse_local_ids(raw_ids)
+            result = await device_task_members.add_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
+            snapshot = await device_task_members.snapshot(name)
+            rendered = ", ".join(str(value) for value in result)
+            if snapshot.scope_mode == EXCLUDE:
+                await message.answer(f"已将本地用户重新纳入任务 {html.escape(name)}：{rendered}（范围为 EXCLUDE，剩余排除 {len(snapshot.member_ids)} 个）")
             else:
-                snapshot = await task.snapshot(name)
-                if snapshot.scope_mode == EXCLUDE:
-                    await message.answer(f"已将成员重新纳入任务 {html.escape(name)}：{html.escape(', '.join(result))}（范围为 EXCLUDE，剩余排除 {len(snapshot.member_ids)} 个）")
-                else:
-                    await message.answer(f"已加入任务 {html.escape(name)} 成员：{html.escape(', '.join(result))}（范围为 ALLOWLIST）")
-        except DomainError as exc:
+                await message.answer(f"已加入任务 {html.escape(name)} 本地用户：{rendered}（范围为 ALLOWLIST）")
+        except (DomainError, ValueError) as exc:
             await message.answer(f"成员范围更新失败：{html.escape(str(exc))}")
 
     @router.message(Command("deletetaskmember"))
-    async def delete_task_member(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
+    async def delete_task_member(
+        message: Message,
+        command: CommandObject,
+        task: QuotaTaskService,
+        device_task_members: DeviceTaskMemberService,
+    ) -> None:
         if not is_admin(message):
             return
         try:
             values = (command.args or "").split()
-            name, ids = await task.resolve_members_args(values, usage="用法：/deletetaskmember <任务名> <reclaude_user_id> ...（仅一个任务时可省略任务名）")
-            result = await task.delete_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
-            snapshot = await task.snapshot(name)
+            name, raw_ids = await task.resolve_members_args(
+                values,
+                usage="用法：/deletetaskmember <任务名> <本地用户ID> ...（仅一个任务时可省略任务名）",
+            )
+            ids = _parse_local_ids(raw_ids)
+            result = await device_task_members.delete_members(name, ids, message.from_user.id)  # type: ignore[union-attr]
+            snapshot = await device_task_members.snapshot(name)
+            rendered = ", ".join(str(value) for value in result)
             if snapshot.scope_mode == EXCLUDE:
-                await message.answer(f"已将成员从任务 {html.escape(name)} 排除：{html.escape(', '.join(result))}（范围为 EXCLUDE，其余及新加入成员仍被覆盖）")
+                await message.answer(f"已将本地用户从任务 {html.escape(name)} 排除：{rendered}（范围为 EXCLUDE，其余及新加入用户仍被覆盖）")
             else:
-                await message.answer(f"已移除任务 {html.escape(name)} 成员：{html.escape(', '.join(result))}；剩余为空时不会执行任何配额动作。")
-        except DomainError as exc:
+                await message.answer(f"已移除任务 {html.escape(name)} 本地用户：{rendered}；ALLOWLIST 为空时不会执行任何配额动作。")
+        except (DomainError, ValueError) as exc:
             await message.answer(f"成员范围更新失败：{html.escape(str(exc))}")
 
     @router.message(Command("account", "recovery_enable"))
@@ -570,7 +785,7 @@ def build_admin_router(settings: Settings) -> Router:
             return
         try:
             await recovery.health_sync_reconcile_enable(message.from_user.id)  # type: ignore[union-attr]
-            await message.answer("账号、周期和成员健康检查完成；限额任务仍为 STOPPED，请使用 /starttask 显式启动。")
+            await message.answer("所选账号已通过登录与健康校验；任务保持 STOPPED，写闸未开启。需要启用配额时请使用 /starttask。")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
         except Exception:
@@ -606,15 +821,81 @@ def build_admin_router(settings: Settings) -> Router:
 
 
 def _format_datetime(value: object) -> str:
+    if isinstance(value, datetime):
+        return format_beijing(value)
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
 
 
-async def _record_username_safely(quota: QuotaService, telegram_user_id: int, username: str | None) -> None:
-    """Best-effort username cache refresh; a failure must never break the command itself."""
+async def _record_username_safely_from_store(
+    factory: async_sessionmaker[AsyncSession],
+    telegram_user_id: int,
+    username: str | None,
+) -> None:
+    """Refresh the local username cache without breaking the calling command."""
     try:
-        await quota.record_username(telegram_user_id, username)
+        async with factory() as session:
+            async with session.begin():
+                user = await session.scalar(
+                    select(User).where(User.telegram_user_id == telegram_user_id).with_for_update()
+                )
+                if user is not None:
+                    user.telegram_username = username.casefold() if username else None
+                    user.updated_at = utcnow()
     except Exception as exc:
         log.warning("telegram_username_refresh_failed", telegram_user_id=telegram_user_id, error=str(exc))
+
+
+async def _find_local_user(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    telegram_user_id: int | None = None,
+    username: str | None = None,
+) -> tuple[int, str] | None:
+    if (telegram_user_id is None) == (username is None):
+        raise EligibilityError("需要指定一个 Telegram 用户")
+    async with factory() as session:
+        statement = select(User.id, User.email)
+        if telegram_user_id is not None:
+            statement = statement.where(User.telegram_user_id == telegram_user_id)
+        else:
+            statement = statement.where(User.telegram_username == str(username).casefold())
+        rows = (await session.execute(statement.limit(2))).all()
+    if len(rows) > 1:
+        raise EligibilityError("该用户名对应多个本地用户，请使用 Telegram 用户提及")
+    if not rows:
+        return None
+    return rows[0].id, rows[0].email
+
+
+async def _find_existing_user_by_email(
+    factory: async_sessionmaker[AsyncSession],
+    email: str,
+) -> int:
+    normalized = normalize_email(email)
+    async with factory() as session:
+        user_id = await session.scalar(select(User.id).where(User.email_normalized == normalized))
+    if user_id is None:
+        raise EligibilityError("该邮箱未绑定本地用户；请先完成 /bind，不会自动创建用户")
+    return user_id
+
+
+def _parse_local_ids(values: list[str]) -> list[int]:
+    if not values or any(not value.isdigit() or int(value) <= 0 for value in values):
+        raise EligibilityError("本地用户 ID 必须是正整数")
+    return [int(value) for value in values]
+
+
+async def _answer_lines(message: Message, lines: list[str]) -> None:
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if current and len(candidate) > 4000:
+            await message.answer(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        await message.answer(current)
 
 
 def _text_without_entities(text: str, entities: Iterable[MessageEntity]) -> str:
@@ -624,26 +905,3 @@ def _text_without_entities(text: str, entities: Iterable[MessageEntity]) -> str:
         start, end = entity.offset * 2, (entity.offset + entity.length) * 2
         encoded = encoded[:start] + encoded[end:]
     return encoded.decode("utf-16-le")
-
-
-async def _account_usage_lines(quota: QuotaService) -> list[str]:
-    """Live account usage windows for /taskusers; degrades to a notice when /me fails."""
-
-    try:
-        account = await quota.get_account_usage()
-    except Exception:
-        return ["账号用量：暂时不可用（上游查询失败）"]
-    five_hour_reset = _format_datetime(account.five_hour_resets_at) if account.five_hour_resets_at is not None else "未激活"
-    return [
-        f"账号：{html.escape(account.email_masked)}（快照 {_format_datetime(account.usage_updated_at)}）",
-        f"5h 限额：已用 {_format_percent(account.five_hour_utilization)} | 重置：{five_hour_reset}",
-        f"7天限额：已用 {_format_percent(account.seven_day_utilization)} | 重置：{_format_datetime(account.seven_day_resets_at)} | 预估总额度：{_format_estimated_total(account.seven_day_estimated_total)}",
-    ]
-
-
-def _format_percent(value: Decimal | None) -> str:
-    return f"{value:.1f}%" if value is not None else "未知"
-
-
-def _format_estimated_total(value: Decimal | None) -> str:
-    return f"≈${value:.2f}" if value is not None else "—"

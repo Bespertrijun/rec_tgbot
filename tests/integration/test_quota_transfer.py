@@ -4,11 +4,11 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.infrastructure.db.models import AuditLog, QuotaAdjustment, User
 from reclaude_bot.infrastructure.reclaude.models import Member
+from tests.fixtures.legacy_users import LegacyMemberUserFixture
 
 
 async def _bound_pair(factory, gateway, settings):
@@ -18,7 +18,7 @@ async def _bound_pair(factory, gateway, settings):
     await quota.sync_cycle_from_me(now=now)
     gateway.member_rows["u-2"] = Member(user_id="u-2", email="two@example.com", account_id=None, total_usage_usd="0")
     await quota.sync_members(now=now)
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     await binding.bind(301, "one@example.com", telegram_username="Alice")
     await binding.bind(302, "two@example.com", telegram_username="bob")
     return quota, now
@@ -133,7 +133,7 @@ async def test_bind_stores_username_casefolded(app_context):
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
 
-    await BindingService(factory, gateway).bind(301, "one@example.com", telegram_username="Alice")
+    await LegacyMemberUserFixture(factory, gateway).bind(301, "one@example.com", telegram_username="Alice")
 
     async with factory() as session:
         user = await session.scalar(select(User).where(User.telegram_user_id == 301))

@@ -28,6 +28,9 @@ data/*
 !data/cookies/
 data/cookies/*
 !data/cookies/.gitkeep
+data-device/
+!data-device/
+data-device/*
 cookies/
 *.cookie
 *.cookies

@@ -1,0 +1,29 @@
+{
+  "range": "all",
+  "models_granularity": "week",
+  "overview": {
+    "sessions": 186,
+    "sessions_partial": false,
+    "messages": 34294,
+    "total_tokens": 5922450809,
+    "input_tokens": 5520795,
+    "output_tokens": 35490019,
+    "cache_create_5m_tokens": 74711591,
+    "cache_create_1h_tokens": 213601942,
+    "cache_read_input_tokens": 5593126462,
+    "total_usd": "5839.0072946000",
+    "active_days": 55,
+    "current_streak": 7,
+    "longest_streak": 15,
+    "peak_hour": 12,
+    "favorite_model": "claude-opus-4-8",
+    "heatmap": [
+      {"date": "2026-06-19", "value": 75511206, "messages": 289, "total_usd": "59.6409707500"},
+      {"date": "2026-09-27", "value": 194576644, "messages": 1044, "total_usd": "83.6705497000"}
+    ]
+  },
+  "models": {
+    "timeseries": [{"ts": 1781481600000, "per_model": {"claude-opus-4-8": 138917339}, "per_model_usd": {"claude-opus-4-8": 137.42610775}}],
+    "breakdown": [{"model": "claude-opus-4-8", "total_usd": "3117.5869550000", "percent": 53.4}]
+  }
+}

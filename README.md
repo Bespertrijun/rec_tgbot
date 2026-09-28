@@ -1,7 +1,7 @@
 # Reclaude Quota Bot
 
-Single-process Telegram bot for binding Reclaude members and enforcing a configurable
-cycle quota from the upstream members snapshot. It uses PostgreSQL exclusively at runtime
+Single-process Telegram bot for binding local users, associating Reclaude devices, and
+enforcing a per-user cycle quota from device usage snapshots. It uses PostgreSQL exclusively at runtime
 through the required `postgresql+asyncpg://` URL and a
 dedicated, persistent Reclaude session. No SMTP, email verification, API key, or port 25
 is required.
@@ -19,10 +19,15 @@ Production deployment, GHCR access, server `.env` handling, upgrades, rollbacks,
 backups are documented in [`docs/deployment.md`](docs/deployment.md). Never use a Cookie
 that has been pasted into chat, a ticket, source control, or CI output.
 
-The normal loop calls `/members` once per minute and keeps the latest member assignment
-and cumulative usage locally. Users only need `/bind email` and `/status`, and can
-transfer part of their own cycle quota to another bound user with `/send @user amount`
-inside a managed group; administrators
-group members into named quota tasks with per-task limits (`/newtask`, `/settaskquota`) and
-inspect one task's usage with `/taskusers`. Account assignment itself remains an
-operator action in the Reclaude console.
+The device runtime samples associated devices, preserves cumulative usage across device
+changes, and retries failed samples without treating missing data as zero. Users bind with
+`/bind email`, authorize in private chat with `/auth`, revoke with `/deauth`, inspect their
+device and quota state with `/status`, and transfer quota with `/send @user amount` in a
+managed group. Administrators manage devices and local user scopes with `/device`,
+`/authuser`, `/deauthuser`, `/member`, and task commands. See
+[`docs/device-ledger-rollout.md`](docs/device-ledger-rollout.md) before deploying this
+runtime over data created by the legacy member-allocation quota loop; legacy balances are
+not automatically migrated or reset.
+
+首次从旧版切换请参考[中文上线步骤](docs/device-cutover-zh.md)：旧余额按已确认规则作废，
+新旧数据库独立保留，并说明已有设备关联的计费起点与待核对限制。

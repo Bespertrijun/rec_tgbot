@@ -1,8 +1,11 @@
 import os
 from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -10,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from reclaude_bot.config import Settings, validate_postgresql_database_url
 from reclaude_bot.infrastructure.db import models  # noqa: F401
 from reclaude_bot.infrastructure.db.base import Base
+from reclaude_bot.infrastructure.db.models import Device, DeviceTaskScope, QuotaTask, User
 from reclaude_bot.infrastructure.reclaude.fake import FakeReclaudeGateway
 from reclaude_bot.infrastructure.reclaude.models import CurrentAccount, Member, MeResponse, SevenDay, UsageSnapshot, WeeklyLimit
 
@@ -102,3 +106,71 @@ async def postgres_factories():
         yield first, second
     finally:
         await engine.dispose()
+
+
+def postgres_test_url():
+    raw = os.getenv("TEST_DATABASE_URL")
+    if not raw:
+        pytest.skip("requires isolated TEST_DATABASE_URL")
+    url = make_url(validate_postgresql_database_url(raw))
+    if not url.database or not url.database.endswith("_test"):
+        pytest.fail("test database name must end with _test")
+    return url
+
+
+@pytest_asyncio.fixture(params=["sqlite", "postgresql"])
+async def lifecycle_db(request):
+    device_now = datetime(2026, 9, 28, tzinfo=UTC)
+    schema = "device_test_" + uuid4().hex
+    if request.param == "postgresql":
+        url = postgres_test_url()
+        admin_engine = create_async_engine(url)
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+    else:
+        admin_engine = None
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def enable_fks(connection, _):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            session.add_all([
+                User(id=i, telegram_user_id=1000 + i, email=f"{i}@example.invalid", email_normalized=f"{i}@example.invalid",
+                     reclaude_user_id=f"legacy-{i}", bound_at=device_now, updated_at=device_now)
+                for i in (1, 2)
+            ])
+            session.add_all([
+                QuotaTask(id=i, name=f"task-{i}", name_normalized=f"task-{i}", limit_usd=Decimal("700"), created_at=device_now, updated_at=device_now)
+                for i in (1, 2)
+            ])
+            await session.flush()
+            session.add_all([
+                DeviceTaskScope(task_id=i, org_id=177 + i, created_at=device_now, updated_at=device_now)
+                for i in (1, 2)
+            ])
+            session.add_all([
+                Device(org_id=org, device_id=device, name="test", first_synced_at=device_now, last_synced_at=device_now)
+                for org, device in ((178, 44500), (178, 44501), (179, 44502))
+            ])
+            await session.flush()
+            if request.param == "postgresql":
+                # Explicit fixture IDs do not advance PostgreSQL sequences.
+                # New local users must receive IDs beyond the seeded rows.
+                await session.execute(text("SELECT setval(pg_get_serial_sequence('users', 'id'), (SELECT max(id) FROM users))"))
+                await session.execute(text("SELECT setval(pg_get_serial_sequence('quota_tasks', 'id'), (SELECT max(id) FROM quota_tasks))"))
+        yield factory, request.param
+    finally:
+        await engine.dispose()
+        if admin_engine is not None:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+            await admin_engine.dispose()

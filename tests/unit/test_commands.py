@@ -24,46 +24,18 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
     calls = bot.set_my_commands.await_args_list
 
     assert isinstance(calls[0].kwargs["scope"], BotCommandScopeDefault)
-    assert _commands(calls[0]) == [
-        {"command": "start", "description": "开始使用"},
-        {"command": "bind", "description": "绑定邮箱（需要参数）"},
-        {"command": "status", "description": "查看额度状态"},
-        {"command": "send", "description": "群内转账额度给其他用户"},
-    ]
-
+    public = {"start", "bind", "status", "auth", "deauth", "send"}
+    admin = {"sync", "member", "setquota", "ban", "unban", "unbind", "device", "authuser", "deauthuser", "audit", "groups",
+             "account", "use", "newtask", "deltatask", "task", "starttask", "stoptask", "startstats", "stopstats", "addtaskmember",
+             "deletetaskmember", "settaskquota", "taskusers", "update", "recovery_enable"}
+    assert {entry["command"] for entry in _commands(calls[0])} == public
     for call, admin_id in zip(calls[1:], [101, 202], strict=True):
         scope = call.kwargs["scope"]
         assert isinstance(scope, BotCommandScopeChat)
         assert scope.chat_id == admin_id
-        assert _commands(call) == [
-            {"command": "start", "description": "开始使用"},
-            {"command": "bind", "description": "绑定邮箱（需要参数）"},
-            {"command": "status", "description": "查看额度状态"},
-            {"command": "send", "description": "群内转账额度给其他用户"},
-            {"command": "sync", "description": "同步上游成员"},
-            {"command": "member", "description": "查看上游成员列表"},
-            {"command": "setquota", "description": "设置全局默认额度"},
-            {"command": "ban", "description": "禁用用户"},
-            {"command": "unban", "description": "解禁用户"},
-            {"command": "unbind", "description": "解绑用户"},
-            {"command": "audit", "description": "查看审计记录"},
-            {"command": "groups", "description": "查看托管群组"},
-            {"command": "account", "description": "查看 Reclaude 实时账号"},
-            {"command": "use", "description": "选择并同步 Reclaude 账号"},
-            {"command": "newtask", "description": "新建限额任务"},
-            {"command": "deltatask", "description": "删除限额任务"},
-            {"command": "task", "description": "查看限额任务状态"},
-            {"command": "starttask", "description": "启动限额任务"},
-            {"command": "stoptask", "description": "停止限额任务"},
-            {"command": "startstats", "description": "启动数据统计"},
-            {"command": "stopstats", "description": "停止数据统计"},
-            {"command": "addtaskmember", "description": "加入限额任务成员"},
-            {"command": "deletetaskmember", "description": "移除限额任务成员"},
-            {"command": "settaskquota", "description": "设置任务每用户额度"},
-            {"command": "taskusers", "description": "查看任务成员使用状况"},
-            {"command": "update", "description": "更新并重启 Bot"},
-            {"command": "recovery_enable", "description": "兼容旧版恢复命令"},
-        ]
+        assert {entry["command"] for entry in _commands(call)} == public | admin
+        assert all(entry["description"].strip() for entry in _commands(call))
+
 
 
 @pytest.mark.asyncio

@@ -7,15 +7,15 @@ from sqlalchemy.exc import IntegrityError
 
 from reclaude_bot.application.actions import QuotaActionService
 from reclaude_bot.application.admin import AdminService
-from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.recovery import RecoveryGate, RecoveryService
 from reclaude_bot.application.task import QuotaTaskService
-from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, QuotaRevocationStatus, TaskStatus
+from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, QuotaRevocationStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, QuotaTask, ServiceState, UpstreamMember, User
+from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, QuotaCycle, QuotaRevocation, ServiceState, UpstreamMember, User
 from reclaude_bot.infrastructure.reclaude.models import Member, MeResponse, SevenDay, WeeklyLimit
 from reclaude_bot.jobs.usage_poll import poll_once
+from tests.fixtures.legacy_users import LegacyMemberUserFixture
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,7 @@ async def test_status_is_cache_only_and_used_uses_dynamic_limit(app_context):
     now = datetime(2026, 8, 18, tzinfo=UTC)
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    await BindingService(factory, gateway).bind(301, "one@example.com")
+    await LegacyMemberUserFixture(factory, gateway).bind(301, "one@example.com")
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=None, total_usage_usd="25")
     members_calls = gateway.members_calls
     await quota.sync_members(now=now + timedelta(minutes=1))
@@ -73,12 +73,13 @@ async def test_recovery_health_checks_accounts_without_enabling_task(app_context
     )
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(8123, 1)
     quota = QuotaService(factory, gateway, settings)
     recovery = RecoveryService(gate, quota, gateway, settings)
     await recovery.health_sync_reconcile_enable(1)
     assert gateway.me_calls == 1
     assert gateway.accounts_calls == 1
-    assert gateway.members_calls == 1
+    assert gateway.members_calls == 0
     assert gateway.account_id == 8123
     assert await gate.is_enabled() is False
     async with factory() as session:
@@ -89,7 +90,8 @@ async def test_recovery_health_checks_accounts_without_enabling_task(app_context
         assert audit_row is not None
         assert audit_row.parameters_summary == {"account_id": "8123"}
         cycle = await session.scalar(select(QuotaCycle))
-        assert cycle.source_account_id == 8123
+        assert cycle is None
+        assert await session.scalar(select(AuditLog).where(AuditLog.action == "DEVICE_ACCOUNT_RECOVERY_VALIDATED")) is not None
 
 
 @pytest.mark.asyncio
@@ -190,13 +192,13 @@ async def test_select_account_upstream_failure_leaves_gate_disabled(app_context)
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
 
-    async def fail_members():
-        raise ConnectionError("members unavailable")
+    async def fail_accounts():
+        raise ConnectionError("accounts unavailable")
 
-    gateway.members = fail_members
+    gateway.accounts = fail_accounts
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(ConnectionError, match="members unavailable"):
+    with pytest.raises(ConnectionError, match="accounts unavailable"):
         await recovery.select_account(4949, 1)
 
     assert gateway.account_id is None
@@ -218,7 +220,7 @@ async def test_select_account_final_audit_failure_rolls_back_activation(app_cont
     with pytest.raises(RuntimeError, match="audit unavailable"):
         await recovery.select_account(4949, 1)
 
-    assert gateway.members_calls == 1
+    assert gateway.members_calls == 0
     assert gateway.account_id is None
     assert await gate.is_enabled() is False
     async with factory() as session:
@@ -256,7 +258,7 @@ async def test_recovery_rejects_multiple_accounts_without_configuring_id(app_con
     quota = QuotaService(factory, gateway, settings)
     recovery = RecoveryService(gate, quota, gateway, settings)
 
-    with pytest.raises(EligibilityError, match="不唯一"):
+    with pytest.raises(EligibilityError, match="尚未选择"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
@@ -269,9 +271,10 @@ async def test_recovery_rejects_zero_bound_accounts(app_context):
     gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": "healthy", "lifecycle": "unbound", "org_id": 178}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(8123, 1)
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(EligibilityError, match="没有可用的已绑定账号"):
+    with pytest.raises(EligibilityError, match="未绑定"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
@@ -285,6 +288,7 @@ async def test_recovery_rejects_banned_account_health(app_context, health):
     gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": health, "lifecycle": "bound", "org_id": 178}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(8123, 1)
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
     with pytest.raises(EligibilityError, match="健康状态不可用"):
@@ -304,9 +308,10 @@ async def test_recovery_rejects_banned_current_account_before_discovery(app_cont
     )
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(4949, 1)
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(EligibilityError, match="当前账号未绑定"):
+    with pytest.raises(EligibilityError, match="当前账号状态异常"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.accounts_calls == 0
@@ -321,6 +326,7 @@ async def test_recovery_rejects_missing_or_blank_account_health(app_context, hea
     gateway.account_rows = [{"id": 7022, "account_id": 8123, "health": health, "lifecycle": "bound", "org_id": 178}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(8123, 1)
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
     with pytest.raises(EligibilityError, match="健康状态不可用"):
@@ -336,9 +342,10 @@ async def test_recovery_rejects_missing_account_id_even_when_record_id_exists(ap
     gateway.account_rows = [{"id": 7022, "health": "healthy", "lifecycle": "bound", "org_id": 178}]
     gate = RecoveryGate(factory)
     await gate.ensure_disabled()
+    await gate.persist_selected_account(8123, 1)
     recovery = RecoveryService(gate, QuotaService(factory, gateway, settings), gateway, settings)
 
-    with pytest.raises(EligibilityError, match="account_id"):
+    with pytest.raises(EligibilityError, match="不存在"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None
@@ -389,7 +396,7 @@ async def test_write_disabled_gate_prevents_automatic_revoke(app_context):
     actions = QuotaActionService(factory, gateway, quota, settings, gate=gate)
     await quota.sync_cycle_from_me(now=datetime(2026, 8, 18, tzinfo=UTC))
     await quota.sync_members(now=datetime(2026, 8, 18, tzinfo=UTC))
-    await BindingService(factory, gateway).bind(302, "one@example.com")
+    await LegacyMemberUserFixture(factory, gateway).bind(302, "one@example.com")
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd="800")
     members_before = gateway.members_calls
     await poll_once(quota, actions, now=datetime(2026, 8, 18, 0, 1, tzinfo=UTC))
@@ -405,7 +412,7 @@ async def test_duplicate_quota_revocation_is_rejected(app_context):
     now = datetime(2026, 8, 18, tzinfo=UTC)
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    user = await BindingService(factory, gateway).bind(303, "one@example.com")
+    user = await LegacyMemberUserFixture(factory, gateway).bind(303, "one@example.com")
     async with factory() as session:
         cycle = await quota.current_cycle(session, now)
         session.add(QuotaRevocation(user_id=user.id, cycle_id=cycle.id, state=QuotaRevocationStatus.REVOKED.value, updated_at=now))
@@ -486,7 +493,7 @@ async def _seed_revoked_user(app_context):
     now = datetime(2026, 8, 18, tzinfo=UTC)
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    user = await BindingService(factory, gateway).bind(200, "one@example.com")
+    user = await LegacyMemberUserFixture(factory, gateway).bind(200, "one@example.com")
     actions = QuotaActionService(factory, gateway, quota, settings)
     task = QuotaTaskService(factory, gateway)
     await task.create_task("default", None, 1)
@@ -523,52 +530,31 @@ def _set_weekly_reset(gateway, reset: datetime) -> None:
 
 
 @pytest.mark.asyncio
-async def test_select_account_carries_over_revocation_and_auto_restores(app_context, fixed_clock):
+async def test_account_switch_is_rejected_without_migrating_or_auto_restoring(app_context, fixed_clock):
     factory, gateway, settings, quota, actions, task, user, now = await _seed_revoked_user(app_context)
-    async with factory() as session:
-        old_cycle = await quota.current_cycle(session, now)
-        old_revocation = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == old_cycle.id))
-        assert old_revocation.state == QuotaRevocationStatus.REVOKED.value
-    assert gateway.member_rows["u-1"].account_id is None
-
     _add_second_account(gateway)
-    # The new account's week ends earlier than the old cycle, so it becomes current.
     new_reset = datetime(2026, 8, 20, tzinfo=UTC)
     _set_weekly_reset(gateway, new_reset)
-    gate = RecoveryGate(factory)
-    recovery = RecoveryService(gate, quota, gateway, settings)
-    fixed_clock[0] = now + timedelta(minutes=3)
-
-    account = await recovery.select_account(8123, 1)
-
-    assert account.account_id == 8123
+    recovery = RecoveryService(RecoveryGate(factory), quota, gateway, settings)
+    members_before = gateway.members_calls
+    with pytest.raises(EligibilityError, match="暂不支持切换"):
+        await recovery.select_account(8123, 1)
+    assert gateway.account_id == 4949
+    assert gateway.members_calls == members_before
+    assert gateway.assign_calls == []
     async with factory() as session:
         state = await session.get(ServiceState, 1)
-        assert state.selected_account_id == "8123"
-        # The previously RUNNING task resumes and re-opens the write latch.
-        assert state.write_enabled is True
-        task_row = await session.scalar(select(QuotaTask).where(QuotaTask.name_normalized == "default"))
-        assert task_row.status == TaskStatus.RUNNING.value
-        new_cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at == new_reset))
-        assert new_cycle is not None
-        carried = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == new_cycle.id))
-        assert carried is not None
-        assert carried.state == QuotaRevocationStatus.REVOKED.value
-        actions_logged = set((await session.scalars(select(AuditLog.action))).all())
-        assert "QUOTA_REVOCATION_CARRY_OVER" in actions_logged
-        assert "ACCOUNT_SWITCH_TASKS_RESUMED" in actions_logged
-
-    # The next regular ticks re-assign the carried-over member and reconcile RESTORED.
-    await poll_once(quota, actions, now=now + timedelta(minutes=4))
-    assert gateway.assign_calls == ["u-1"]
-    await poll_once(quota, actions, now=now + timedelta(minutes=5))
-    async with factory() as session:
-        carried = await session.scalar(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id, QuotaRevocation.cycle_id == new_cycle.id))
-        assert carried.state == QuotaRevocationStatus.RESTORED.value
+        assert state.selected_account_id == "4949" and state.write_enabled is True
+        assert await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at == new_reset)) is None
+        rows = (await session.scalars(select(QuotaRevocation).where(QuotaRevocation.user_id == user.id))).all()
+        assert len(rows) == 1 and rows[0].state == QuotaRevocationStatus.REVOKED.value
+        logged = set((await session.scalars(select(AuditLog.action))).all())
+        assert "QUOTA_REVOCATION_CARRY_OVER" not in logged
+        assert "ACCOUNT_SWITCH_TASKS_RESUMED" not in logged
 
 
 @pytest.mark.asyncio
-async def test_select_account_rebaselines_current_cycle_usage(app_context, fixed_clock):
+async def test_select_account_preserves_current_cycle_usage(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gateway.configure_account_id(4949)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=4949, total_usage_usd=Decimal("0"))
@@ -583,7 +569,7 @@ async def test_select_account_rebaselines_current_cycle_usage(app_context, fixed
         baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id))
         assert baseline.baseline_total_usd == Decimal("0")
 
-    # Re-selecting an account on the same weekly reset keeps the cycle but zeroes usage.
+    # Selecting the initial account must not rewrite existing member accounting.
     recovery = RecoveryService(RecoveryGate(factory), quota, gateway, settings)
     fixed_clock[0] = now + timedelta(minutes=2)
     account = await recovery.select_account(4949, 1)
@@ -591,8 +577,8 @@ async def test_select_account_rebaselines_current_cycle_usage(app_context, fixed
     assert account.account_id == 4949
     async with factory() as session:
         baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.cycle_id == cycle.id))
-        assert baseline.baseline_total_usd == Decimal("300")
-        assert baseline.source == "account_switch"
+        assert baseline.baseline_total_usd == Decimal("0")
+        assert baseline.source == "cycle_boundary"
         assert baseline.status == BaselineStatus.VERIFIED.value
         state = await session.get(ServiceState, 1)
         # Nothing was RUNNING before the switch, so the latch stays closed.
@@ -601,7 +587,7 @@ async def test_select_account_rebaselines_current_cycle_usage(app_context, fixed
 
 
 @pytest.mark.asyncio
-async def test_carry_over_skips_restored_assigned_and_unbound_users(app_context, fixed_clock):
+async def test_initial_account_selection_preserves_legacy_revocations_without_migration(app_context, fixed_clock):
     factory, gateway, settings = app_context
     gateway.configure_account_id(4949)
     gateway.member_rows["u-1"] = Member(user_id="u-1", email="one@example.com", account_id=None, total_usage_usd=Decimal("0"))
@@ -611,7 +597,7 @@ async def test_carry_over_skips_restored_assigned_and_unbound_users(app_context,
     now = datetime(2026, 8, 18, tzinfo=UTC)
     cycle = await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     restored_user = await binding.bind(200, "one@example.com")
     assigned_user = await binding.bind(201, "two@example.com")
     unbound_user = await binding.bind(202, "three@example.com")
@@ -632,6 +618,8 @@ async def test_carry_over_skips_restored_assigned_and_unbound_users(app_context,
 
     async with factory() as session:
         new_cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at == new_reset))
-        assert new_cycle is not None
-        carried = (await session.scalars(select(QuotaRevocation).where(QuotaRevocation.cycle_id == new_cycle.id))).all()
-        assert carried == []
+        assert new_cycle is None
+        rows = (await session.scalars(select(QuotaRevocation).where(QuotaRevocation.cycle_id == cycle.id))).all()
+        assert {row.user_id: row.state for row in rows} == {
+            restored_user.id: "RESTORED", assigned_user.id: "REVOKED", unbound_user.id: "REVOKED",
+        }

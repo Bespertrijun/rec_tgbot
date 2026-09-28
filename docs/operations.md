@@ -3,59 +3,65 @@
 ## Backups
 
 Use `scripts/backup.sh` daily and retain encrypted PostgreSQL dumps for at least 30 days.
-Cookie jars are deliberately not included in database backups. Target RPO is 24 hours and RTO
-is 4 hours. Run `scripts/restore.sh` monthly in an isolated database, then perform a full
-members snapshot and cycle-baseline reconcile before enabling quota writes.
+Cookie jars are deliberately excluded from database backups. Target RPO is 24 hours and
+RTO is 4 hours. Run `scripts/restore.sh` monthly in an isolated database, then verify the
+selected Reclaude account, device-cycle evidence, and unresolved REVOKE actions before
+enabling device quota tasks. Do not recreate device balances from the legacy upstream
+member snapshot; see the [device-ledger rollout gate](device-ledger-rollout.md).
 
-## Health gates
+## Account and recovery
 
-The service fails closed when a selected account is not live, its lifecycle is not `bound`, its
-health is empty or `banned`, its `account_id` is missing or invalid, or a session request returns
-`401`. `/account` is a read-only live inventory (including a banned current account); `/use <account_id>`
-validates one selected record, reconciles it, zeroes current-cycle usage baselines, and carries
-still-active revocations into the current cycle so removed members are restored automatically once
-enforcement resumes. Tasks that were RUNNING before the switch resume automatically (re-opening
-writes); when no task was running, writes stay disabled until `/starttask`.
-Use `/starttask <name>` as the operator write switch per task, and `/stoptask <name>` to stop one;
-the write latch stays open while any task remains `RUNNING`, and the shared quota loop keeps
-syncing usage data even after every task has stopped. `/startstats` and `/stopstats` control the
-usage-sync loop itself; the stopped state persists across restarts, and while sync is off,
-enforcement blocks itself on stale member snapshots. `/starttask` while sync is off still marks
-the task `RUNNING` (with a bot warning) but starts no loop until `/startstats`. The legacy
-`/recovery_enable` command retains the stricter single-bound-account discovery flow but does not
-independently start any task. The account record's separate database `id` is never used. No retry
-is attempted after the first `401` until the recovery runbook is completed.
+`/account` reads the current login and live account inventory. `/use <account_id>` selects
+the initial healthy bound account and leaves tasks STOPPED with the write latch closed.
+Using `/use` for the already selected account revalidates it. Selecting a different
+account is refused; the command does not reset balances, sync legacy members, or resume
+tasks. Replacing an account requires a separately reviewed cutover for existing device
+associations and unresolved REVOKE actions.
 
-Quota enforcement is organized as multiple named tasks (`quota_tasks`), each with its own per-user
-limit and member scope. All tasks run against the single selected Reclaude account. Create one with
-`/newtask <name> [limit]` (the limit defaults to the global `/setquota` value) and remove it with
-`/deltatask <name>`. Tasks start stopped on a new database; the migration carries the previous
-single-task switch and allowlist into a `default` task. A persisted `RUNNING` state survives a
-restart and resumes only after startup validates the selected account. The internal `RecoveryGate`
-remains a fail-safe for startup validation, invalid accounts, and 401 recovery, and stops all
-running tasks when it trips. `/task` lists every task, `/task <name>` reports one task's state and
-best-effort tick health. `/member` lists all cached upstream member emails and Reclaude user IDs for
-use with `/addtaskmember`. Member scope defaults to `ALL`; use
-`/addtaskmember <name> <reclaude_user_id> ...` to create an `ALLOWLIST`, `/deletetaskmember <name> ...`
-to remove IDs, and `/addtaskmember <name> all` to clear the member list and return to `ALL`. Deleting
-from an `ALL` (or `EXCLUDE`) task switches it to `EXCLUDE`: the listed IDs are excluded while every
-other current and future upstream member stays covered; `/addtaskmember <name> <id>` on an `EXCLUDE`
-task re-includes the ID. When only
-one task exists its name may be omitted. Change a task's limit with `/settaskquota <name> <amount>`;
-the new limit reconciles immediately from the local cache. `/taskusers <name>` works in admin
-private chats only and lists every scoped member's current-cycle usage against the task limit. It
-also reads `/api/app/me` live to show the account's 5-hour and 7-day window utilization with reset
-times, plus an estimated 7-day window total (the locally cached cycle spend divided by the reported
-utilization); that section degrades to a notice when the upstream read fails, while
-the member list stays cache-only.
-A member covered by several RUNNING tasks is enforced at the strictest (smallest) limit, because
-upstream revocation is account-level. Group onboarding remains independent of the quota tasks.
+A `401` forces all quota tasks to STOPPED and closes the write latch. After repairing the
+dedicated session, run `/account`, verify the persisted account, and explicitly start only
+the tasks that should resume. `/recovery_enable` is a compatibility alias that validates
+the selected account and leaves all tasks STOPPED. Normal API calls do not silently retry
+password login.
 
-Quota writes also require a fresh `/members` snapshot. The default maximum age is 90 seconds;
-future-dated or older snapshots are ignored until the next normal members sync. Override this
-with `MEMBER_SNAPSHOT_MAX_AGE_SECONDS` when the polling interval requires a different bound.
+An UNKNOWN AUTH remains reserved. Device-list queries never infer that an UNKNOWN AUTH
+succeeded, and users must not resend its authorization link. For manual or automatic
+REVOKE timeouts, the background reconciliation loop lists the full organization device
+inventory and checks every armed unresolved revoke, including user/admin deauth and older
+cycles. It never repeats the POST.
+
+## Device tasks and quota
+
+Each Reclaude organization has one device-scoped task. Create it with `/newtask <name>
+[limit]`; use `/member` to find local numeric user IDs for `/addtaskmember` and
+`/deletetaskmember`. The default scope is `ALL`; adding members changes it to `ALLOWLIST`,
+deleting from `ALL` changes it to `EXCLUDE`, and `/addtaskmember <name> all` restores
+`ALL`. `/task` reports task state and the latest device-cycle evidence. `/taskusers` shows
+local users, their device association, and device-ledger usage.
+
+`/starttask` opens automatic quota actions for the configured device task. `/stoptask`
+stops those actions while device sampling continues. `/stopstats` pauses the shared cycle
+and usage sampling loop; `/startstats` resumes it. With statistics stopped, old snapshots
+are not treated as fresh evidence. Sampling failures stay pending and are retried without
+an age cutoff or conversion to zero.
+
+The task's write state and `RecoveryGate.write_enabled` both guard automatic quota revoke.
+Manual `/deauth` and `/deauthuser` do not depend on the automatic write latch. Manual
+`/auth` still requires current task scope and verified quota evidence. Admin
+`/authuser <email> <device_id>` resolves an already-bound local user; it never creates one.
+Admin `/deauthuser <email>` uses the same identity lookup. Ban only disables a local user
+and does not revoke a device. `/unbind` refuses while an association is open; complete
+`/deauthuser` and wait for confirmed revocation first.
+
+Quota usage is cumulative across device changes. Transfers and limit increases do not
+unlock a quota lock. A fresh, verified account/cycle reading with weekly use below 100%
+allows final-24-hour authorization and exempts automatic quota deauth. The bot sends a
+durable `/auth` notice only while the user remains bound, active, and in the current task
+scope.
 
 ## Incident records
 
-stdout contains JSON structlog events with request/job IDs and no Cookies, full emails, response
-bodies, or authorization headers. Mutating actions are also immutable rows in `audit_logs`.
+stdout contains JSON structlog events with request/job IDs and no Cookies, full emails,
+response bodies, or authorization headers. Repeated device-usage GET failure logs include
+only association/job IDs, the attempt count, and a fixed safe error code. Mutating actions
+are also immutable rows in `audit_logs`.

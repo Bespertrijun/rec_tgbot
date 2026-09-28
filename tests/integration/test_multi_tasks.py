@@ -6,11 +6,11 @@ from sqlalchemy import delete, select
 
 from reclaude_bot.application.actions import QuotaActionService
 from reclaude_bot.application.admin import AdminService
-from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import ALL, QuotaTaskService
 from reclaude_bot.infrastructure.db.models import AuditLog, CycleBaseline, ServiceState, UpstreamMember
 from reclaude_bot.infrastructure.reclaude.models import Member
+from tests.fixtures.legacy_users import LegacyMemberUserFixture
 
 
 async def _prepare(app_context, member_usages: dict[str, str], *, account_id: int | None = 4949):
@@ -24,7 +24,7 @@ async def _prepare(app_context, member_usages: dict[str, str], *, account_id: in
     now = datetime(2026, 8, 18, tzinfo=UTC)
     await quota.sync_cycle_from_me(now=now)
     await quota.sync_members(now=now)
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     users = {}
     for index, reclaude_user_id in enumerate(member_usages):
         users[reclaude_user_id] = await binding.bind(200 + index, f"{reclaude_user_id}@example.com")
@@ -179,7 +179,7 @@ async def test_exclude_scope_covers_all_but_excluded_and_new_members(app_context
     # A member joining later is covered automatically: baseline 0 first, then usage 800.
     gateway.member_rows["u-3"] = Member(user_id="u-3", email="three@example.com", account_id=4949, total_usage_usd=Decimal("0"))
     await quota.sync_members(now=now)
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     await binding.bind(203, "three@example.com")
     gateway.member_rows["u-3"] = Member(user_id="u-3", email="three@example.com", account_id=4949, total_usage_usd=Decimal("800"))
     await quota.sync_members(now=now)
@@ -211,7 +211,7 @@ async def test_unknown_baseline_does_not_block_enforcement(app_context):
         baseline = await session.scalar(select(CycleBaseline).where(CycleBaseline.reclaude_user_id == "u-1"))
     assert baseline is not None and baseline.status == "UNKNOWN"
 
-    binding = BindingService(factory, gateway)
+    binding = LegacyMemberUserFixture(factory, gateway)
     await binding.bind(200, "u-1@example.com")
     async with factory() as session:
         async with session.begin():

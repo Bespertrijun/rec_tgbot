@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import stat
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -18,11 +20,107 @@ from pydantic import SecretStr
 from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError, UpstreamError
 
 from .constants import DEFAULT_RECLAUDE_USER_AGENT
-from .models import AccountsResponse, MembersResponse, MeResponse
+from .models import (
+    AccountsResponse,
+    DeviceAuthApproval,
+    DeviceAuthDescription,
+    DeviceRecord,
+    DeviceRevokeResponse,
+    DeviceUsage,
+    MembersResponse,
+    MeResponse,
+)
 
 log = structlog.get_logger(__name__)
 
 _RECOGNIZED_SESSION_COOKIE_NAMES = frozenset({"rc_sid", "session", "sessionid", "sid", "auth_token"})
+_SAFE_DEVICE_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
+_SAFE_DEVICE_ERROR_SCOPES = frozenset({"account", "org", "organization"})
+
+
+class DeviceApiError(UpstreamError):
+    """Safe device API failure carrying only selected upstream error metadata."""
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        status: int | None = None,
+        code: str | None = None,
+        retryable: bool | None = None,
+        current: int | None = None,
+        max: int | None = None,
+        scope: str | None = None,
+        outcome_unknown: bool = False,
+        attempt_count: int | None = None,
+    ) -> None:
+        self.operation = operation
+        self.status = status
+        self.code = code if isinstance(code, str) and _SAFE_DEVICE_ERROR_CODE.fullmatch(code) else None
+        self.retryable = retryable if isinstance(retryable, bool) else None
+        self.current = current if isinstance(current, int) and not isinstance(current, bool) and current >= 0 else None
+        self.max = max if isinstance(max, int) and not isinstance(max, bool) and max >= 0 else None
+        self.scope = scope if isinstance(scope, str) and scope.casefold() in _SAFE_DEVICE_ERROR_SCOPES else None
+        self.outcome_unknown = outcome_unknown
+        self.attempt_count = (
+            attempt_count
+            if isinstance(attempt_count, int) and not isinstance(attempt_count, bool) and attempt_count > 0
+            else None
+        )
+
+        message = "Reclaude device API request failed"
+        if self.status is not None:
+            message += f" (HTTP {self.status})"
+        if self.code is not None:
+            message += f" ({self.code})"
+        if self.current is not None and self.max is not None:
+            message += f"; capacity {self.current}/{self.max}"
+            if self.scope is not None:
+                message += f" ({self.scope})"
+        super().__init__(message)
+
+
+class _RequestRetriesExhausted(UpstreamError):
+    def __init__(self, attempt_count: int) -> None:
+        self.attempt_count = attempt_count
+        super().__init__("Reclaude request retries exhausted")
+
+
+def _positive_device_id(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise EligibilityError(f"Reclaude {label} must be a positive integer")
+    return value
+
+
+def _looks_like_device_error(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is False or payload.get("success") is False:
+        return True
+    if payload.get("error") not in (None, False, ""):
+        return True
+    return "code" in payload and any(key in payload for key in ("type", "layer", "detail"))
+
+
+def _device_error_from_payload(payload: Any, *, operation: str, status: int, outcome_unknown: bool) -> DeviceApiError:
+    root = payload if isinstance(payload, dict) else {}
+    nested = root.get("error")
+    source = nested if isinstance(nested, dict) else root
+    code = source.get("code", root.get("code"))
+    retryable = source.get("retryable", root.get("retryable"))
+    detail = source.get("detail", root.get("detail"))
+    details = detail if isinstance(detail, dict) else {}
+    scope = details.get("scope")
+    return DeviceApiError(
+        operation=operation,
+        status=status,
+        code=code,
+        retryable=retryable,
+        current=details.get("current"),
+        max=details.get("max"),
+        scope=scope,
+        outcome_unknown=outcome_unknown,
+    )
 
 
 class ReclaudeGateway(Protocol):
@@ -205,7 +303,7 @@ class ReclaudeClient:
         if self._client is not None:
             await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    async def _request(self, method: str, path: str, *, capture_http_errors: bool = False, **kwargs: Any) -> httpx.Response:
         if self._circuit_open:
             raise AuthenticationCircuitOpen("Reclaude authentication circuit is open")
         if not self._session_available:
@@ -222,9 +320,9 @@ class ReclaudeClient:
             for attempt in range(attempts):
                 try:
                     response = await self._client.request(method_upper, path, **kwargs)
-                except httpx.HTTPError as exc:
+                except httpx.HTTPError:
                     if attempt + 1 >= attempts:
-                        raise UpstreamError(f"Reclaude request failed: {exc}") from exc
+                        raise _RequestRetriesExhausted(attempt + 1) from None
                     await asyncio.sleep(0.2 * (2**attempt))
                     continue
                 self._canonicalize_response_cookies(response)
@@ -242,6 +340,11 @@ class ReclaudeClient:
                 if response.status_code >= 500 and attempt + 1 < attempts:
                     await asyncio.sleep(0.2 * (2**attempt))
                     continue
+                if method_upper == "GET" and response.status_code >= 500:
+                    raise _RequestRetriesExhausted(attempt + 1)
+                if response.status_code >= 400 and capture_http_errors:
+                    log.warning("reclaude_request_error", request_id=request_id, path=path, status=response.status_code)
+                    return response
                 if response.status_code >= 400:
                     log.warning("reclaude_request_error", request_id=request_id, path=path, status=response.status_code)
                     raise UpstreamError(f"Reclaude returned HTTP {response.status_code}")
@@ -249,6 +352,46 @@ class ReclaudeClient:
                 log.info("reclaude_request", request_id=request_id, path=path, status=response.status_code, duration_ms=round((time.monotonic() - started) * 1000, 2))
                 return response
         raise UpstreamError("request lock exited without response")
+
+    async def _device_request_json(self, method: str, path: str, *, operation: str, **kwargs: Any) -> Any:
+        is_post = method.upper() == "POST"
+        try:
+            response = await self._request(method, path, capture_http_errors=True, **kwargs)
+        except AuthenticationCircuitOpen:
+            raise
+        except UpstreamError as exc:
+            raise DeviceApiError(
+                operation=operation,
+                outcome_unknown=is_post,
+                attempt_count=getattr(exc, "attempt_count", None),
+            ) from None
+
+        try:
+            payload = response.json(parse_float=Decimal)
+        except (ValueError, TypeError):
+            raise DeviceApiError(
+                operation=operation,
+                status=response.status_code,
+                outcome_unknown=is_post,
+            ) from None
+        if response.status_code >= 400 or _looks_like_device_error(payload):
+            error = _device_error_from_payload(
+                payload,
+                operation=operation,
+                status=response.status_code,
+                outcome_unknown=is_post,
+            )
+            is_explicit_device_limit = (
+                is_post
+                and path == "/api/cli/auth/approve"
+                and (200 <= response.status_code < 300 or 400 <= response.status_code < 500)
+                and error.code == "client.device_limit_reached"
+                and error.retryable is False
+            )
+            if is_explicit_device_limit:
+                error.outcome_unknown = False
+            raise error
+        return payload
 
     async def authenticate(self) -> MeResponse:
         """Validate the current session, or perform one explicit recovery login.
@@ -350,6 +493,83 @@ class ReclaudeClient:
             return AccountsResponse.model_validate(response.json())
         except (TypeError, ValueError) as exc:
             raise UpstreamError("Reclaude accounts response has invalid shape") from exc
+
+    async def describe_device_auth(self, state: str) -> DeviceAuthDescription:
+        if not isinstance(state, str) or not state.strip():
+            raise EligibilityError("Reclaude authorization state is invalid")
+        payload = await self._device_request_json(
+            "POST",
+            "/api/cli/auth/describe",
+            operation="authorization description",
+            json={"state": state},
+        )
+        try:
+            description = DeviceAuthDescription.model_validate(payload)
+        except (TypeError, ValueError):
+            raise DeviceApiError(operation="authorization description", outcome_unknown=True) from None
+        if description.state != state:
+            raise DeviceApiError(operation="authorization description", outcome_unknown=True) from None
+        return description
+
+    async def approve_device_auth(self, state: str, device_name: str, org_id: int) -> DeviceAuthApproval:
+        if not isinstance(state, str) or not state.strip():
+            raise EligibilityError("Reclaude authorization state is invalid")
+        if not isinstance(device_name, str) or not device_name.strip():
+            raise EligibilityError("Reclaude device name is invalid")
+        validated_org_id = _positive_device_id(org_id, "organization ID")
+        payload = await self._device_request_json(
+            "POST",
+            "/api/cli/auth/approve",
+            operation="device authorization",
+            json={"device_name": device_name, "org_id": validated_org_id, "state": state},
+        )
+        try:
+            return DeviceAuthApproval.model_validate(payload)
+        except (TypeError, ValueError):
+            raise DeviceApiError(operation="device authorization", outcome_unknown=True) from None
+
+    async def list_devices(self) -> list[DeviceRecord]:
+        payload = await self._device_request_json(
+            "GET",
+            "/api/app/devices",
+            operation="device listing",
+        )
+        if not isinstance(payload, list):
+            raise DeviceApiError(operation="device listing")
+        try:
+            return [DeviceRecord.model_validate(item) for item in payload]
+        except (TypeError, ValueError):
+            raise DeviceApiError(operation="device listing") from None
+
+    async def revoke_device(self, device_id: int) -> DeviceRevokeResponse:
+        validated_device_id = _positive_device_id(device_id, "device ID")
+        payload = await self._device_request_json(
+            "POST",
+            f"/api/app/devices/{validated_device_id}/revoke",
+            operation="device revocation",
+        )
+        try:
+            return DeviceRevokeResponse.model_validate(payload)
+        except (TypeError, ValueError):
+            raise DeviceApiError(operation="device revocation", outcome_unknown=True) from None
+
+    async def device_usage(self, device_id: int, org_id: int, range: str = "all") -> DeviceUsage:
+        validated_device_id = _positive_device_id(device_id, "device ID")
+        validated_org_id = _positive_device_id(org_id, "organization ID")
+        if not isinstance(range, str) or range not in {"all", "7d"}:
+            raise EligibilityError("Reclaude usage range must be 'all' or '7d'")
+        payload = await self._device_request_json(
+            "GET",
+            "/api/app/usage/stats",
+            operation="device usage query",
+            params={"range": range, "device_id": validated_device_id, "org_id": validated_org_id},
+        )
+        if not isinstance(payload, dict) or payload.get("range") != range:
+            raise DeviceApiError(operation="device usage query")
+        try:
+            return DeviceUsage.model_validate(payload)
+        except (TypeError, ValueError):
+            raise DeviceApiError(operation="device usage query") from None
 
     def configure_account_id(self, account_id: int | str) -> None:
         if isinstance(account_id, bool) or (isinstance(account_id, str) and not account_id.strip()):

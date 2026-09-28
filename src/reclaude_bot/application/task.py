@@ -11,7 +11,20 @@ from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.domain.enums import TaskStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import DEFAULT_QUOTA_LIMIT, as_decimal
-from reclaude_bot.infrastructure.db.models import QuotaTask, QuotaTaskMember, RuntimeSetting, ServiceState, UpstreamMember
+from reclaude_bot.infrastructure.db.models import (
+    DeviceAssociation,
+    DeviceCycleLedger,
+    DeviceQuotaCycle,
+    DeviceResampleJob,
+    DeviceTaskMember,
+    DeviceTaskScope,
+    DeviceUsageSnapshot,
+    QuotaTask,
+    QuotaTaskMember,
+    RuntimeSetting,
+    ServiceState,
+    UpstreamMember,
+)
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 
 ALL = "ALL"
@@ -42,9 +55,11 @@ class QuotaTaskService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         gateway: ReclaudeGateway | None = None,
+        org_id: int | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.gateway = gateway
+        self.org_id = org_id
 
     async def resolve(self, name: str | None) -> str:
         """Resolve an optional task name to an existing task's display name."""
@@ -91,6 +106,16 @@ class QuotaTaskService:
                 if limit < 0:
                     raise EligibilityError("额度不能为负数")
                 now = utcnow()
+                if self.org_id is not None:
+                    if isinstance(self.org_id, bool) or not isinstance(self.org_id, int) or self.org_id <= 0:
+                        raise EligibilityError("组织 ID 必须是正整数")
+                    existing_scope = await session.scalar(
+                        select(DeviceTaskScope)
+                        .where(DeviceTaskScope.org_id == self.org_id)
+                        .with_for_update()
+                    )
+                    if existing_scope is not None:
+                        raise EligibilityError("当前组织已经配置了设备限额任务")
                 task = QuotaTask(
                     name=display,
                     name_normalized=normalized,
@@ -104,6 +129,17 @@ class QuotaTaskService:
                 )
                 session.add(task)
                 await session.flush()
+                if self.org_id is not None:
+                    session.add(
+                        DeviceTaskScope(
+                            task_id=task.id,
+                            org_id=self.org_id,
+                            scope_mode=ALL,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    await session.flush()
                 await audit(
                     session,
                     actor_telegram_id=operator_id,
@@ -111,7 +147,11 @@ class QuotaTaskService:
                     action="QUOTA_TASK_CREATED",
                     target_type="QUOTA_TASK",
                     target_id=str(task.id),
-                    parameters_summary={"name": display, "limit_usd": str(limit)},
+                    parameters_summary={
+                        "name": display,
+                        "limit_usd": str(limit),
+                        **({"org_id": self.org_id} if self.org_id is not None else {}),
+                    },
                 )
         return await self.snapshot(display)
 
@@ -121,6 +161,26 @@ class QuotaTaskService:
             async with session.begin():
                 task = await self._get_task(session, resolved, with_for_update=True)
                 now = utcnow()
+                if self.org_id is not None:
+                    scope = await session.scalar(
+                        select(DeviceTaskScope)
+                        .where(DeviceTaskScope.task_id == task.id, DeviceTaskScope.org_id == self.org_id)
+                        .with_for_update()
+                    )
+                    if scope is not None:
+                        has_history = any(
+                            [
+                                await session.scalar(select(DeviceAssociation.id).where(DeviceAssociation.task_id == task.id).limit(1)),
+                                await session.scalar(select(DeviceQuotaCycle.id).where(DeviceQuotaCycle.task_id == task.id).limit(1)),
+                                await session.scalar(select(DeviceCycleLedger.id).where(DeviceCycleLedger.task_id == task.id).limit(1)),
+                                await session.scalar(select(DeviceUsageSnapshot.id).where(DeviceUsageSnapshot.org_id == self.org_id).limit(1)),
+                                await session.scalar(select(DeviceResampleJob.id).join(DeviceAssociation, DeviceAssociation.id == DeviceResampleJob.association_id).where(DeviceAssociation.task_id == task.id).limit(1)),
+                            ]
+                        )
+                        if has_history:
+                            raise EligibilityError("任务已有设备关联或计量历史，不能删除")
+                        await session.execute(delete(DeviceTaskMember).where(DeviceTaskMember.task_id == task.id))
+                        await session.delete(scope)
                 await session.execute(delete(QuotaTaskMember).where(QuotaTaskMember.task_id == task.id))
                 await audit(
                     session,
@@ -138,6 +198,43 @@ class QuotaTaskService:
     async def list_tasks(self) -> list[TaskSnapshot]:
         async with self.session_factory() as session:
             tasks = list((await session.scalars(select(QuotaTask).order_by(QuotaTask.name_normalized.asc()))).all())
+            if self.org_id is not None:
+                scopes = {
+                    scope.task_id: scope
+                    for scope in (
+                        await session.scalars(
+                            select(DeviceTaskScope).where(DeviceTaskScope.org_id == self.org_id)
+                        )
+                    ).all()
+                }
+                members = list(
+                    (
+                        await session.scalars(
+                            select(DeviceTaskMember)
+                            .join(DeviceTaskScope, DeviceTaskScope.task_id == DeviceTaskMember.task_id)
+                            .where(DeviceTaskScope.org_id == self.org_id)
+                            .order_by(DeviceTaskMember.task_id, DeviceTaskMember.user_id)
+                        )
+                    ).all()
+                )
+                device_members_by_task: dict[int, list[int]] = {}
+                for member in members:
+                    device_members_by_task.setdefault(member.task_id, []).append(member.user_id)
+                return [
+                    TaskSnapshot(
+                        id=task.id,
+                        name=task.name,
+                        enabled=task.status == TaskStatus.RUNNING.value,
+                        scope_mode=scopes[task.id].scope_mode if task.id in scopes else ALL,
+                        limit_usd=as_decimal(task.limit_usd),
+                        member_ids=tuple(str(value) for value in device_members_by_task.get(task.id, ())),
+                        missing_member_ids=(),
+                        updated_at=task.updated_at,
+                        updated_by=task.updated_by,
+                    )
+                    for task in tasks
+                    if task.id in scopes
+                ]
             rows = list((await session.scalars(select(QuotaTaskMember).order_by(QuotaTaskMember.reclaude_user_id.asc()))).all())
             upstream_ids = set((await session.scalars(select(UpstreamMember.reclaude_user_id))).all())
             members_by_task: dict[int, list[str]] = {}
@@ -149,6 +246,35 @@ class QuotaTaskService:
         resolved = await self.resolve(name)
         async with self.session_factory() as session:
             task = await self._get_task(session, resolved)
+            if self.org_id is not None:
+                scope = await session.scalar(
+                    select(DeviceTaskScope).where(
+                        DeviceTaskScope.task_id == task.id,
+                        DeviceTaskScope.org_id == self.org_id,
+                    )
+                )
+                if scope is None:
+                    raise EligibilityError("任务未配置到当前 Reclaude 组织")
+                user_ids = tuple(
+                    (
+                        await session.scalars(
+                            select(DeviceTaskMember.user_id)
+                            .where(DeviceTaskMember.task_id == task.id)
+                            .order_by(DeviceTaskMember.user_id)
+                        )
+                    ).all()
+                )
+                return TaskSnapshot(
+                    id=task.id,
+                    name=task.name,
+                    enabled=task.status == TaskStatus.RUNNING.value,
+                    scope_mode=scope.scope_mode,
+                    limit_usd=as_decimal(task.limit_usd),
+                    member_ids=tuple(str(value) for value in user_ids),
+                    missing_member_ids=(),
+                    updated_at=task.updated_at,
+                    updated_by=task.updated_by,
+                )
             rows = tuple(
                 (
                     await session.scalars(
@@ -412,6 +538,10 @@ class QuotaTaskService:
         task = await session.scalar(query)
         if task is None:
             raise EligibilityError(f"任务不存在：{name.strip()}，请使用 /task 查看现有任务")
+        if self.org_id is not None:
+            scope = await session.get(DeviceTaskScope, task.id)
+            if scope is None or scope.org_id != self.org_id:
+                raise EligibilityError("任务未配置到当前 Reclaude 组织")
         return task
 
     @staticmethod
@@ -423,9 +553,13 @@ class QuotaTaskService:
             raise EligibilityError(f"任务名称 {value} 为保留字")
         return value.casefold()
 
-    @staticmethod
-    async def _any_running(session: AsyncSession) -> bool:
-        return bool(await session.scalar(select(func.count(QuotaTask.id)).where(QuotaTask.status == TaskStatus.RUNNING.value)))
+    async def _any_running(self, session: AsyncSession) -> bool:
+        statement = select(func.count(QuotaTask.id)).where(QuotaTask.status == TaskStatus.RUNNING.value)
+        if self.org_id is not None:
+            statement = statement.join(DeviceTaskScope, DeviceTaskScope.task_id == QuotaTask.id).where(
+                DeviceTaskScope.org_id == self.org_id
+            )
+        return bool(await session.scalar(statement))
 
     async def _refresh_latch(self, session: AsyncSession, now: datetime) -> None:
         """Open the global write latch while any task runs; close it otherwise."""

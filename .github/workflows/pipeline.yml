@@ -67,7 +67,7 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src tests alembic
 
-      - name: Validate production Compose with safe placeholders
+      - name: Validate legacy and device Compose with safe placeholders
         env:
           COMPOSE_PROJECT_NAME: reclaude-ci
         run: |
@@ -90,6 +90,8 @@ jobs:
           cp "${ci_env}" .env
           trap 'rm -f .env' EXIT
           docker compose --env-file "${ci_env}" config --quiet
+          docker compose --file docker-compose.device.yml --env-file "${ci_env}" config --quiet
+          docker compose --file docker-compose.dev.yml --env-file "${ci_env}" config --quiet
 
   secret-scan:
     name: Scan repository for leaked secrets
@@ -128,7 +130,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   publish:
-    name: Publish image to GHCR
+    name: Publish isolated device image to GHCR
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [quality, secret-scan, docker-build]
     runs-on: ubuntu-latest
@@ -149,86 +151,91 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push SHA and latest tags
+      - name: Build and push device channel tags
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:device-sha-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:device-latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    name: Deploy isolated device channel
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEVICE_DEPLOY_ENABLED == 'true' && vars.DEVICE_DEPLOY_PATH != '' && vars.DEVICE_DEPLOY_PATH != vars.DEPLOY_PATH
     needs: publish
     runs-on: ubuntu-latest
-    environment: production
+    environment: device-production
     permissions:
       contents: read
     env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-      IMAGE_TAG: ghcr.io/bespertrijun/rec_tgbot:sha-${{ github.sha }}
+      DEVICE_DEPLOY_HOST: ${{ secrets.DEVICE_DEPLOY_HOST }}
+      DEVICE_DEPLOY_PORT: ${{ secrets.DEVICE_DEPLOY_PORT }}
+      DEVICE_DEPLOY_USER: ${{ secrets.DEVICE_DEPLOY_USER }}
+      DEVICE_DEPLOY_PATH: ${{ vars.DEVICE_DEPLOY_PATH }}
+      LEGACY_DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      DEVICE_IMAGE_TAG: ghcr.io/bespertrijun/rec_tgbot:device-sha-${{ github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Prepare SSH identity and known hosts
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEVICE_DEPLOY_SSH_KEY: ${{ secrets.DEVICE_DEPLOY_SSH_KEY }}
+          DEVICE_DEPLOY_KNOWN_HOSTS: ${{ secrets.DEVICE_DEPLOY_KNOWN_HOSTS }}
         run: |
           set -eu
           install -d -m 700 "${HOME}/.ssh"
-          printf '%s\n' "${DEPLOY_SSH_KEY}" > "${HOME}/.ssh/deploy_key"
-          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
-          chmod 600 "${HOME}/.ssh/deploy_key" "${HOME}/.ssh/known_hosts"
+          printf '%s\n' "${DEVICE_DEPLOY_SSH_KEY}" > "${HOME}/.ssh/device_deploy_key"
+          printf '%s\n' "${DEVICE_DEPLOY_KNOWN_HOSTS}" > "${HOME}/.ssh/device_known_hosts"
+          chmod 600 "${HOME}/.ssh/device_deploy_key" "${HOME}/.ssh/device_known_hosts"
 
-      - name: Upload production Compose only
+      - name: Upload device Compose to its isolated path
         run: |
           set -eu
+          if [ -n "${LEGACY_DEPLOY_PATH}" ] && [ "$(realpath -m -- "${DEVICE_DEPLOY_PATH}")" = "$(realpath -m -- "${LEGACY_DEPLOY_PATH}")" ]; then
+            printf '%s\n' "device and legacy deployment paths must be different" >&2
+            exit 1
+          fi
           ssh_args=(
-            -p "${DEPLOY_PORT}"
-            -i "${HOME}/.ssh/deploy_key"
+            -p "${DEVICE_DEPLOY_PORT}"
+            -i "${HOME}/.ssh/device_deploy_key"
             -o BatchMode=yes
             -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+            -o UserKnownHostsFile="${HOME}/.ssh/device_known_hosts"
           )
           scp_args=(
-            -P "${DEPLOY_PORT}"
-            -i "${HOME}/.ssh/deploy_key"
+            -P "${DEVICE_DEPLOY_PORT}"
+            -i "${HOME}/.ssh/device_deploy_key"
             -o BatchMode=yes
             -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+            -o UserKnownHostsFile="${HOME}/.ssh/device_known_hosts"
           )
-          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "mkdir -p -- '${DEPLOY_PATH}' && test -f '${DEPLOY_PATH}/.env'"
-          scp "${scp_args[@]}" docker-compose.yml \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.yml.new"
-          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "set -eu; cd -- '${DEPLOY_PATH}'; test -f .env; mv -f -- docker-compose.yml.new docker-compose.yml"
+          ssh "${ssh_args[@]}" "${DEVICE_DEPLOY_USER}@${DEVICE_DEPLOY_HOST}" \
+            "mkdir -p -- '${DEVICE_DEPLOY_PATH}' && test -f '${DEVICE_DEPLOY_PATH}/.env'"
+          scp "${scp_args[@]}" docker-compose.device.yml \
+            "${DEVICE_DEPLOY_USER}@${DEVICE_DEPLOY_HOST}:${DEVICE_DEPLOY_PATH}/docker-compose.yml.new"
+          ssh "${ssh_args[@]}" "${DEVICE_DEPLOY_USER}@${DEVICE_DEPLOY_HOST}" \
+            "set -eu; cd -- '${DEVICE_DEPLOY_PATH}'; test -f .env; mv -f -- docker-compose.yml.new docker-compose.yml"
 
       - name: Pull, restart, and verify the bot remotely
         run: |
           set -eu
           ssh_args=(
-            -p "${DEPLOY_PORT}"
-            -i "${HOME}/.ssh/deploy_key"
+            -p "${DEVICE_DEPLOY_PORT}"
+            -i "${HOME}/.ssh/device_deploy_key"
             -o BatchMode=yes
             -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+            -o UserKnownHostsFile="${HOME}/.ssh/device_known_hosts"
           )
-          ssh "${ssh_args[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+          ssh "${ssh_args[@]}" "${DEVICE_DEPLOY_USER}@${DEVICE_DEPLOY_HOST}" \
             "set -eu
-             cd -- '${DEPLOY_PATH}'
+             cd -- '${DEVICE_DEPLOY_PATH}'
              test -f .env
-             export BOT_IMAGE='${IMAGE_TAG}'
+             export DEVICE_BOT_IMAGE='${DEVICE_IMAGE_TAG}'
              docker compose pull bot
              docker compose up -d --remove-orphans
              sleep 5

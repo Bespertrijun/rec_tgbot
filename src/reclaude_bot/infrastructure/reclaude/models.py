@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 
 def parse_epoch_or_datetime(value: Any) -> datetime:
@@ -186,3 +186,113 @@ class MeResponse(StrictModel):
         if selected.resets_at is None:
             raise ValueError("weekly_all limit is missing resets_at")
         return selected
+
+
+class DeviceAuthDescription(StrictModel):
+    state: StrictStr = Field(repr=False)
+    device_name: StrictStr
+    created_at: datetime
+    expires_at: datetime
+    hostname: StrictStr | None = None
+    os: StrictStr | None = None
+    arch: StrictStr | None = None
+    client_ip_masked: StrictStr | None = None
+    client_user_agent: StrictStr | None = None
+    machine_summary: Any = None
+
+    @field_validator("created_at", "expires_at", mode="before")
+    @classmethod
+    def parse_times(cls, value: Any) -> datetime:
+        if isinstance(value, bool):
+            raise ValueError("invalid device authorization timestamp")
+        return parse_epoch_or_datetime(value)
+
+
+class DeviceAuthApproval(StrictModel):
+    ok: StrictBool
+    device_id: StrictInt
+    reused: StrictBool
+    user_email: StrictStr | None = None
+
+    @field_validator("ok", mode="before")
+    @classmethod
+    def require_true_ok(cls, value: Any) -> bool:
+        if value is not True:
+            raise ValueError("device authorization was not confirmed")
+        return value
+
+    @field_validator("device_id")
+    @classmethod
+    def require_positive_device_id(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("device ID must be positive")
+        return value
+
+
+class DeviceRecord(StrictModel):
+    id: StrictInt
+    org_id: StrictInt
+    name: StrictStr
+    created_at: datetime
+    revoked_at: datetime | None
+    client_platform: StrictStr | None = None
+    client_version: StrictStr | None = None
+    last_used_at: datetime | None = None
+    last_used_ip: StrictStr | None = None
+    machine_summary: Any = None
+    sk_prefix: StrictStr | None = None
+    sk_rotated_at: datetime | None = None
+
+    @field_validator("id", "org_id")
+    @classmethod
+    def require_positive_ids(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("device and organization IDs must be positive")
+        return value
+
+    @field_validator("created_at", "last_used_at", "revoked_at", "sk_rotated_at", mode="before")
+    @classmethod
+    def parse_device_times(cls, value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("invalid device timestamp")
+        return parse_epoch_or_datetime(value)
+
+
+class DeviceRevokeResponse(StrictModel):
+    ok: StrictBool
+
+    @field_validator("ok", mode="before")
+    @classmethod
+    def require_true_ok(cls, value: Any) -> bool:
+        if value is not True:
+            raise ValueError("device revocation was not confirmed")
+        return value
+
+
+class DeviceUsageOverview(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    total_usd: Decimal
+    heatmap: Any = None
+
+    @field_validator("total_usd", mode="before")
+    @classmethod
+    def parse_total_usd(cls, value: Any) -> Decimal:
+        if isinstance(value, bool):
+            raise ValueError("usage total must be a non-negative decimal")
+        try:
+            total = Decimal(str(value))
+        except (ValueError, TypeError, ArithmeticError) as exc:
+            raise ValueError("usage total must be a non-negative decimal") from exc
+        if not total.is_finite() or total < 0:
+            raise ValueError("usage total must be a finite non-negative decimal")
+        return total
+
+
+class DeviceUsage(StrictModel):
+    range: Literal["all", "7d"]
+    overview: DeviceUsageOverview
+    models_granularity: StrictStr | None = None
+    models: Any = None

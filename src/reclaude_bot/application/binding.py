@@ -12,7 +12,7 @@ from reclaude_bot.application.onboarding import OnboardingService
 from reclaude_bot.application.recovery import RecoveryGate
 from reclaude_bot.domain.enums import BaselineStatus, BindingStatus, UserStatus
 from reclaude_bot.domain.errors import BindingError
-from reclaude_bot.infrastructure.db.models import CycleBaseline, QuotaCycle, UpstreamMember, User
+from reclaude_bot.infrastructure.db.models import DeviceAssociation, User
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
 
 
@@ -59,86 +59,72 @@ class BindingService:
         username = telegram_username.casefold() if telegram_username else None
         self._check_rate(telegram_user_id, now)
         normalized = normalize_email(email)
-        if "@" not in normalized or len(normalized) > 320:
+        local, separator, domain = normalized.partition("@")
+        if normalized.count("@") != 1 or not separator or not local or not domain or any(character.isspace() for character in normalized) or len(normalized) > 320:
             raise BindingError("邮箱格式无效")
         result: User | None = None
-        async with self.session_factory() as session:
-            async with session.begin():
-                member = await session.scalar(select(UpstreamMember).where(UpstreamMember.email_normalized == normalized))
-                if member is None:
-                    raise BindingError("等待首次成员同步，请稍后重试")
-                existing_tg = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id).with_for_update())
-                existing_email = await session.scalar(select(User).where(User.email_normalized == normalized).with_for_update())
-                existing_reclaude = await session.scalar(select(User).where(User.reclaude_user_id == member.reclaude_user_id).with_for_update())
-                existing = existing_tg or existing_email or existing_reclaude
-                if existing:
-                    if existing_tg is not None and existing_tg.binding_status == BindingStatus.UNBOUND.value:
-                        existing_tg.telegram_username = username
-                        existing_tg.email = email.strip()
-                        existing_tg.email_normalized = normalized
-                        existing_tg.reclaude_user_id = member.reclaude_user_id
-                        existing_tg.binding_status = BindingStatus.BOUND.value
-                        existing_tg.status = UserStatus.ACTIVE.value
-                        existing_tg.updated_at = now
-                        cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at > now).order_by(QuotaCycle.reset_at.asc()))
-                        if cycle is not None:
-                            baseline = await session.scalar(
-                                select(CycleBaseline).where(CycleBaseline.reclaude_user_id == member.reclaude_user_id, CycleBaseline.cycle_id == cycle.id)
+        try:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    existing_tg = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id).with_for_update())
+                    existing_email = await session.scalar(select(User).where(User.email_normalized == normalized))
+                    if existing_email is not None and existing_email.telegram_user_id != telegram_user_id:
+                        raise BindingError("该邮箱已被其他账号占用，请联系管理员")
+
+                    if existing_tg is not None:
+                        if existing_tg.status == UserStatus.BANNED.value or existing_tg.binding_status == BindingStatus.DISPUTED.value:
+                            raise BindingError("账号受限，无法绑定或重新绑定，请联系管理员")
+                        if existing_tg.binding_status == BindingStatus.BOUND.value:
+                            if existing_tg.email_normalized != normalized:
+                                raise BindingError("已绑定其他邮箱，请联系管理员解绑后再操作")
+                            existing_tg.telegram_username = username
+                            existing_tg.updated_at = now
+                            result = existing_tg
+                        elif existing_tg.binding_status == BindingStatus.UNBOUND.value:
+                            existing_tg.telegram_username = username
+                            existing_tg.email = email.strip()
+                            existing_tg.email_normalized = normalized
+                            existing_tg.binding_status = BindingStatus.BOUND.value
+                            existing_tg.updated_at = now
+                            await audit(
+                                session,
+                                actor_telegram_id=telegram_user_id,
+                                actor_type="USER",
+                                action="REBIND",
+                                target_type="USER",
+                                target_id=str(existing_tg.id),
+                                parameters_summary={"email": masked_email(email)},
                             )
-                            if baseline is not None:
-                                baseline.user_id = existing_tg.id
-                                existing_tg.baseline_status = baseline.status
+                            result = existing_tg
+                        else:
+                            raise BindingError("账号绑定状态异常，请联系管理员")
+                    else:
+                        row = User(
+                            telegram_user_id=telegram_user_id,
+                            telegram_username=username,
+                            email=email.strip(),
+                            email_normalized=normalized,
+                            reclaude_user_id=None,
+                            binding_status=BindingStatus.BOUND.value,
+                            status=UserStatus.ACTIVE.value,
+                            baseline_status=BaselineStatus.UNKNOWN.value,
+                            bound_at=now,
+                            updated_at=now,
+                        )
+                        session.add(row)
+                        await session.flush()
                         await audit(
                             session,
                             actor_telegram_id=telegram_user_id,
                             actor_type="USER",
-                            action="REBIND",
+                            action="BIND",
                             target_type="USER",
-                            target_id=str(existing_tg.id),
-                            parameters_summary={"email": masked_email(email), "reclaude_user_id": member.reclaude_user_id},
+                            target_id=str(row.id),
+                            parameters_summary={"email": masked_email(email)},
                         )
-                        result = existing_tg
-                    elif existing.telegram_user_id == telegram_user_id and existing.email_normalized == normalized and existing.reclaude_user_id == member.reclaude_user_id:
-                        existing.telegram_username = username
-                        result = existing
-                    else:
-                        raise BindingError("该绑定已被占用，请联系管理员")
-                else:
-                    row = User(
-                        telegram_user_id=telegram_user_id,
-                        telegram_username=username,
-                        email=email.strip(),
-                        email_normalized=normalized,
-                        reclaude_user_id=member.reclaude_user_id,
-                        binding_status=BindingStatus.BOUND.value,
-                        status=UserStatus.ACTIVE.value,
-                        baseline_status=BaselineStatus.UNKNOWN.value,
-                        bound_at=now,
-                        updated_at=now,
-                    )
-                    session.add(row)
-                    try:
-                        await session.flush()
-                    except IntegrityError as exc:
-                        raise BindingError("该绑定已被占用，请联系管理员") from exc
-                    cycle = await session.scalar(select(QuotaCycle).where(QuotaCycle.reset_at > now).order_by(QuotaCycle.reset_at.asc()))
-                    if cycle is not None:
-                        baseline = await session.scalar(
-                            select(CycleBaseline).where(CycleBaseline.reclaude_user_id == member.reclaude_user_id, CycleBaseline.cycle_id == cycle.id)
-                        )
-                        if baseline is not None:
-                            baseline.user_id = row.id
-                            row.baseline_status = baseline.status
-                    await audit(
-                        session,
-                        actor_telegram_id=telegram_user_id,
-                        actor_type="USER",
-                        action="BIND",
-                        target_type="USER",
-                        target_id=str(row.id),
-                        parameters_summary={"email": masked_email(email), "reclaude_user_id": member.reclaude_user_id},
-                    )
-                    result = row
+                        result = row
+        except IntegrityError:
+            raise BindingError("该邮箱或账号已被占用，请联系管理员") from None
         assert result is not None
         if self.onboarding is not None:
             try:
@@ -151,25 +137,15 @@ class BindingService:
 
     async def unbind(self, telegram_user_id: int, *, operator_telegram_id: int, force_revoke: bool = False) -> None:
         async with self.session_factory() as session:
-            user = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
-            if user is None:
-                raise BindingError("用户未绑定")
-            member = await session.scalar(select(UpstreamMember).where(UpstreamMember.reclaude_user_id == user.reclaude_user_id))
-            assigned = member is not None and member.account_id is not None
-            user_id = user.reclaude_user_id
-        if assigned:
-            if not force_revoke:
-                raise BindingError("用户当前有上游分配，需选择撤销并解绑")
-            if self.gate is not None and not await self.gate.is_enabled():
-                raise BindingError("上游写操作已禁用，请先完成恢复核验")
-            if self.gateway is None:
-                raise BindingError("上游客户端不可用")
-            await self.gateway.revoke(user_id)
-        async with self.session_factory() as session:
             async with session.begin():
                 user = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id).with_for_update())
                 if user is None:
                     raise BindingError("用户未绑定")
+                association_id = await session.scalar(
+                    select(DeviceAssociation.id).where(DeviceAssociation.user_id == user.id, DeviceAssociation.ended_at.is_(None)).limit(1)
+                )
+                if association_id is not None:
+                    raise BindingError("用户仍有未结束的设备关联，请先完成 deauth 后再解绑")
                 user.binding_status = BindingStatus.UNBOUND.value
                 user.updated_at = utcnow()
                 await audit(

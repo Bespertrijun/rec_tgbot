@@ -6,9 +6,12 @@ from uuid import uuid4
 
 import structlog
 
-from reclaude_bot.application.actions import QuotaActionService
+from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActionService
+from reclaude_bot.application.device_cycle import DeviceCycleService
+from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import QuotaTaskService
+from reclaude_bot.domain.errors import AuthenticationCircuitOpen
 from reclaude_bot.jobs.onboarding import OnboardingWorker
 from reclaude_bot.jobs.usage_poll import poll_once
 
@@ -22,9 +25,21 @@ class BackgroundJobs:
         actions: QuotaActionService,
         onboarding: OnboardingWorker | None = None,
         task_service: QuotaTaskService | None = None,
+        *,
+        device_cycle: DeviceCycleService | None = None,
+        device_sampling: DeviceSamplingService | None = None,
+        device_actions: DeviceQuotaActionService | None = None,
     ) -> None:
+        device_services = (device_cycle, device_sampling, device_actions)
+        if any(service is not None for service in device_services) and not all(
+            service is not None for service in device_services
+        ):
+            raise ValueError("device cycle, sampling, and action services must be configured together")
         self.quota = quota
         self.actions = actions
+        self.device_cycle = device_cycle
+        self.device_sampling = device_sampling
+        self.device_actions = device_actions
         self.onboarding = onboarding
         self.task_service = task_service
         self.gate = getattr(actions, "gate", None)
@@ -166,7 +181,32 @@ class BackgroundJobs:
         self.last_tick_started = started
         log.info("quota_task_tick_started", job_run_id=job_run_id)
         try:
-            result = await poll_once(self.quota, self.actions, now=now)
+            if self.device_cycle is None or self.device_sampling is None or self.device_actions is None:
+                result = await poll_once(self.quota, self.actions, now=now)
+            else:
+                try:
+                    await self.device_cycle.sync()
+                except AuthenticationCircuitOpen:
+                    raise
+                except Exception as exc:
+                    log.warning(
+                        "device_cycle_sync_failed",
+                        error_type=type(exc).__name__,
+                        authentication_circuit=isinstance(exc, AuthenticationCircuitOpen),
+                    )
+                try:
+                    sampled = await self.device_sampling.tick()
+                except AuthenticationCircuitOpen:
+                    raise
+                except Exception as exc:
+                    sampled = ()
+                    log.warning(
+                        "device_sampling_tick_failed",
+                        error_type=type(exc).__name__,
+                        authentication_circuit=isinstance(exc, AuthenticationCircuitOpen),
+                    )
+                actions = await self.device_actions.run_once(now=now)
+                result = len(sampled) + actions
         except asyncio.CancelledError:
             raise
         except Exception as exc:

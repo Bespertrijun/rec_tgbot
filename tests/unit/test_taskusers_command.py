@@ -1,202 +1,90 @@
-from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pytest
 from structlog.testing import capture_logs
 
 from reclaude_bot.bot.handlers import build_admin_router
 from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import EligibilityError
+from tests.fixtures.local_user_store import local_user_store
 
 
-def _taskusers_handler():
+def handler():
     router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
-    return next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "task_users")
+    return next(item.callback for item in router.message.handlers if item.callback.__name__ == "task_users")
 
 
-def _message(chat_type: str = "private", args: str = "vip") -> SimpleNamespace:
-    return SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type=chat_type), answer=AsyncMock())
+def setup(*, mode="ALLOWLIST", count=2, chat_type="private", error=None):
+    event = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type=chat_type), answer=AsyncMock())
+    command = SimpleNamespace(args="vip")
+    task = SimpleNamespace(resolve=AsyncMock(return_value="vip"), snapshot=AsyncMock(return_value=SimpleNamespace(
+        id=1, name="vip", enabled=True, scope_mode=mode, limit_usd=Decimal("700"))))
+    users = [SimpleNamespace(id=i, email=f"user-{i}<tag>@example.com", binding_status="BOUND", status="ACTIVE") for i in range(1, count + 1)]
+    members = SimpleNamespace(snapshot=AsyncMock(return_value=SimpleNamespace(covered_user_ids=tuple(range(1, count + 1)))))
+    quota = SimpleNamespace(session_factory=local_user_store(users, error=error), status=AsyncMock(return_value=SimpleNamespace(
+        used_usd=Decimal("25"), remaining_usd=Decimal("675"), device_id=44500, quality="VERIFIED")))
+    return event, command, task, members, quota
 
 
-def _command(args: str = "vip") -> SimpleNamespace:
-    return SimpleNamespace(args=args)
+async def test_taskusers_displays_local_device_accounting_and_escapes_email():
+    args = setup()
+    await handler()(*args)
+    event, _, _, _, quota = args
+    text = event.answer.await_args.args[0]
+    assert "本地用户：2 个" in text and "设备 44500" in text and "已用 $25.00" in text and "剩余 $675.00" in text
+    assert "user-1&lt;tag&gt;@example.com" in text
+    quota.status.assert_any_await(1, task_id=1)
 
 
-def _snapshot(scope_mode: str = "ALLOWLIST", member_ids: tuple[str, ...] = ("u-1",)) -> SimpleNamespace:
-    return SimpleNamespace(name="vip", enabled=True, scope_mode=scope_mode, limit_usd=Decimal("50"), member_ids=member_ids)
+async def test_taskusers_discloses_unsynced_amounts():
+    args = setup(count=1)
+    args[-1].status.return_value = SimpleNamespace(used_usd=None, remaining_usd=None, device_id=44500, quality="UNKNOWN")
+    await handler()(*args)
+    text = args[0].answer.await_args.args[0]
+    assert "待同步" in text and "剩余 未知" in text and "已用 $0.00" not in text
 
 
-def _task(snapshot: SimpleNamespace) -> SimpleNamespace:
-    return SimpleNamespace(resolve=AsyncMock(return_value="vip"), snapshot=AsyncMock(return_value=snapshot))
+async def test_taskusers_ignores_group_chats():
+    args = setup(chat_type="supergroup")
+    await handler()(*args)
+    args[2].resolve.assert_not_called()
+    args[0].answer.assert_not_called()
 
 
-def _usage(entries: list[dict[str, object]]) -> dict[str, object]:
-    return {"limit_usd": Decimal("50"), "reset_at": datetime(2026, 8, 25, tzinfo=UTC), "members": entries}
+async def test_taskusers_reports_resolution_errors():
+    args = setup()
+    args[2].resolve.side_effect = EligibilityError("任务不存在")
+    await handler()(*args)
+    args[0].answer.assert_awaited_once_with("任务不存在")
 
 
-def _account() -> SimpleNamespace:
-    return SimpleNamespace(
-        email_masked="ma****@rekwa.com",
-        usage_updated_at=datetime(2026, 8, 18, 5, 0, tzinfo=UTC),
-        five_hour_utilization=Decimal("27"),
-        five_hour_resets_at=None,
-        seven_day_utilization=Decimal("6"),
-        seven_day_resets_at=datetime(2026, 8, 25, 5, 0, tzinfo=UTC),
-        seven_day_estimated_total=Decimal("3500"),
-    )
+async def test_taskusers_sends_empty_allowlist_state():
+    args = setup(count=0)
+    await handler()(*args)
+    assert "白名单为空" in args[0].answer.await_args.args[0]
+    args[-1].status.assert_not_called()
 
 
-_ACCOUNT_LINES = (
-    "账号：ma****@rekwa.com（快照 2026-08-18T05:00:00+00:00）\n"
-    "5h 限额：已用 27.0% | 重置：未激活\n"
-    "7天限额：已用 6.0% | 重置：2026-08-25T05:00:00+00:00 | 预估总额度：≈$3500.00"
-)
+async def test_taskusers_sends_empty_all_scope_state():
+    args = setup(count=0, mode="ALL")
+    await handler()(*args)
+    args[0].answer.assert_awaited_once_with("任务范围内暂无本地用户。")
 
 
-def _entry(rid: str, email: str | None, tg: int | None, used: Decimal | None, remaining: Decimal | None, missing: bool = False) -> dict[str, object]:
-    return {
-        "reclaude_user_id": rid,
-        "email": email,
-        "telegram_user_id": tg,
-        "user_status": "ACTIVE" if tg is not None else None,
-        "used_usd": used,
-        "remaining_usd": remaining,
-        "missing_upstream": missing,
-    }
+async def test_taskusers_splits_long_listing_without_losing_users():
+    args = setup(count=80)
+    await handler()(*args)
+    messages = [call.args[0] for call in args[0].answer.await_args_list]
+    assert len(messages) > 1 and all(len(text) <= 4000 for text in messages)
+    assert sum(line.startswith("- ") for text in messages for line in text.splitlines()) == 80
 
 
-@pytest.mark.asyncio
-async def test_taskusers_handler_renders_all_member_shapes() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot())
-    quota = SimpleNamespace(
-        list_task_usage=AsyncMock(
-            return_value=_usage(
-                [
-                    _entry("u-1", "alice<admin>@example.com", 301, Decimal("25"), Decimal("25")),
-                    _entry("u-2", "bob@example.com", None, Decimal("3"), Decimal("47")),
-                    _entry("u-3", "carol@example.com", 303, None, None),
-                    _entry("u-9", None, None, None, None, missing=True),
-                ]
-            )
-        ),
-        get_account_usage=AsyncMock(return_value=_account()),
-    )
-
-    await handler(message, _command(), task, quota)
-
-    message.answer.assert_awaited_once_with(
-        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：4 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
-        f"{_ACCOUNT_LINES}\n"
-        "- alice&lt;admin&gt;@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00\n"
-        "- bob@example.com | u-2 | 未绑定 | 已用 $3.00 | 剩余 $47.00\n"
-        "- carol@example.com | u-3 | TG 303 | ACTIVE | 数据未同步\n"
-        "- u-9 | 成员已从上游消失"
-    )
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_degrades_when_account_usage_unavailable() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot())
-    quota = SimpleNamespace(
-        list_task_usage=AsyncMock(return_value=_usage([_entry("u-1", "alice@example.com", 301, Decimal("25"), Decimal("25"))])),
-        get_account_usage=AsyncMock(side_effect=RuntimeError("me unavailable")),
-    )
-
-    await handler(message, _command(), task, quota)
-
-    message.answer.assert_awaited_once_with(
-        "任务：vip | RUNNING | 范围：ALLOWLIST | 成员：1 个 | 任务额度 $50.00 | 周期刷新：2026-08-25T00:00:00+00:00\n"
-        "账号用量：暂时不可用（上游查询失败）\n"
-        "- alice@example.com | u-1 | TG 301 | ACTIVE | 已用 $25.00 | 剩余 $25.00"
-    )
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_ignores_group_chats() -> None:
-    handler = _taskusers_handler()
-    message = _message(chat_type="group")
-    task = _task(_snapshot())
-    quota = SimpleNamespace(list_task_usage=AsyncMock())
-
-    await handler(message, _command(), task, quota)
-
-    task.resolve.assert_not_called()
-    quota.list_task_usage.assert_not_called()
-    message.answer.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_reports_resolution_errors() -> None:
-    handler = _taskusers_handler()
-    message = _message(args="")
-    task = SimpleNamespace(resolve=AsyncMock(side_effect=EligibilityError("存在多个任务，请指定名称：base, vip")), snapshot=AsyncMock())
-    quota = SimpleNamespace(list_task_usage=AsyncMock())
-
-    await handler(message, _command(args=""), task, quota)
-
-    message.answer.assert_awaited_once_with("存在多个任务，请指定名称：base, vip")
-    quota.list_task_usage.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_sends_empty_allowlist_state() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot(member_ids=()))
-    quota = SimpleNamespace(list_task_usage=AsyncMock(return_value=_usage([])))
-
-    await handler(message, _command(), task, quota)
-
-    message.answer.assert_awaited_once_with("任务 vip 白名单为空，请使用 /addtaskmember 添加成员。")
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_sends_empty_all_scope_state() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot(scope_mode="ALL", member_ids=()))
-    quota = SimpleNamespace(list_task_usage=AsyncMock(return_value=_usage([])))
-
-    await handler(message, _command(), task, quota)
-
-    message.answer.assert_awaited_once_with("任务范围内暂无成员，请先执行 /sync")
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_splits_long_listing_on_line_boundaries() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot())
-    entries = [_entry(f"u-{index}", f"user-{index}-{'x' * 40}@example.com", 1000 + index, Decimal("1"), Decimal("49")) for index in range(80)]
-    quota = SimpleNamespace(list_task_usage=AsyncMock(return_value=_usage(entries)), get_account_usage=AsyncMock(return_value=_account()))
-
-    await handler(message, _command(), task, quota)
-
-    responses = [call.args[0] for call in message.answer.await_args_list]
-    assert len(responses) > 1
-    assert all(len(response) <= 4000 for response in responses)
-    assert responses[0].startswith("任务：vip | RUNNING | 范围：ALLOWLIST | 成员：80 个")
-    assert sum(line.startswith("- ") for response in responses for line in response.splitlines()) == 80
-
-
-@pytest.mark.asyncio
-async def test_taskusers_handler_logs_unexpected_error_and_returns_safe_message() -> None:
-    handler = _taskusers_handler()
-    message = _message()
-    task = _task(_snapshot())
-    quota = SimpleNamespace(list_task_usage=AsyncMock(side_effect=RuntimeError("usage-secret")))
-
+async def test_taskusers_failure_logs_type_without_exposing_database_text():
+    args = setup(error=RuntimeError("private database string"))
     with capture_logs() as logs:
-        await handler(message, _command(), task, quota)
-
-    event = next(item for item in logs if item.get("event") == "task_usage_listing_failed")
-    assert event.get("error_type") == "RuntimeError"
-    assert event.get("traceback")
-    assert "usage-secret" not in repr(logs)
-    message.answer.assert_awaited_once_with("任务成员使用状况暂时不可用。")
+        await handler()(*args)
+    args[0].answer.assert_awaited_once_with("任务成员使用状况暂时不可用。")
+    event = next(row for row in logs if row.get("event") == "task_usage_listing_failed")
+    assert event["error_type"] == "RuntimeError" and event["traceback"]
+    assert "private database string" not in repr(logs)

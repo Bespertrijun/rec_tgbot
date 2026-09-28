@@ -332,6 +332,8 @@ class QuotaService:
                     raise EligibilityError("不能转账给自己")
                 if recipient.status != UserStatus.ACTIVE.value:
                     raise EligibilityError("对方账号已被禁用")
+                if sender.reclaude_user_id is None or recipient.reclaude_user_id is None:
+                    raise EligibilityError("当前本地绑定尚未接入旧成员额度转账")
                 cycle = await self.current_cycle(session, moment)
                 if cycle is None:
                     raise EligibilityError("当前周期不可用")
@@ -401,6 +403,8 @@ class QuotaService:
             user = await session.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
             if user is None or user.binding_status != "BOUND":
                 raise EligibilityError("用户未绑定")
+            if user.reclaude_user_id is None:
+                raise EligibilityError("当前本地绑定尚未接入设备用量状态")
             cycle = await self.current_cycle(session, moment)
             if cycle is None:
                 raise EligibilityError("当前周期不可用")

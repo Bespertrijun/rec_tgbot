@@ -4,6 +4,22 @@ The bot runtime is PostgreSQL-only. `DATABASE_URL` must be an async SQLAlchemy U
 `postgresql+asyncpg://` scheme; startup rejects SQLite and synchronous PostgreSQL URLs. SQLite
 remains available only for isolated test fixtures and migration checks.
 
+The source tree now contains a device-ledger runtime, while the published production image
+and server database remain separate until an explicit rollout. Read
+[`device-ledger-rollout.md`](device-ledger-rollout.md) before building or deploying that
+runtime. It does not import balances from legacy member-allocation cycles, does not switch
+selected accounts, and does not remove device associations during unbind. Do not use the
+self-update command to cross this runtime boundary; the first device-mode startup runs the
+new schema migrations.
+
+The legacy `docker-compose.yml` continues to reference `:latest`; this workflow no longer
+publishes to or deploys that tag. Device builds use `device-sha-<commit>` and
+`device-latest`, with a separate `docker-compose.device.yml`, project name, and
+`data-device/` storage. Device
+deployment is disabled unless its separate `DEVICE_DEPLOY_ENABLED` variable is explicitly
+set to `true` and a separate deployment path is configured; the legacy `DEPLOY_ENABLED`
+variable cannot enable it.
+
 The production host runs the published image with Docker Compose and keeps its
 configuration and runtime data in the deployment directory. The GitHub deployment job
 uploads only `docker-compose.yml`; it never uploads or overwrites the server `.env` or
@@ -108,37 +124,74 @@ deployment at `/srv/reclaude-bot` stores PostgreSQL data in
    the deployment user so Compose can mount it; the image entrypoint owns and restricts
    `data/cookies` and `data/logs` automatically.
 
-## GitHub settings
+## Device channel GitHub settings
 
-Create a `production` environment and require its approval when appropriate. Add these
-repository/environment secrets exactly as named:
+Create a `device-production` environment and require its approval when appropriate. Add
+these repository/environment secrets for that environment:
 
 | Secret | Value |
 | --- | --- |
-| `DEPLOY_HOST` | Fixed-IP deployment host name or address |
-| `DEPLOY_PORT` | SSH port, normally `22` |
-| `DEPLOY_USER` | Restricted deployment user |
-| `DEPLOY_SSH_KEY` | Private SSH key for that user |
-| `DEPLOY_KNOWN_HOSTS` | Pinned `known_hosts` line(s) for the host |
+| `DEVICE_DEPLOY_HOST` | Fixed-IP device deployment host name or address |
+| `DEVICE_DEPLOY_PORT` | SSH port, normally `22` |
+| `DEVICE_DEPLOY_USER` | Restricted device deployment user |
+| `DEVICE_DEPLOY_SSH_KEY` | Private SSH key for that user |
+| `DEVICE_DEPLOY_KNOWN_HOSTS` | Pinned `known_hosts` line(s) for that host |
 
-Add these variables:
+Add these repository or environment variables:
 
 | Variable | Value |
 | --- | --- |
-| `DEPLOY_ENABLED` | `true` to enable the production job; anything else disables it |
-| `DEPLOY_PATH` | Existing absolute directory, for example `/srv/reclaude-bot` |
+| `DEVICE_DEPLOY_ENABLED` | Set to `true` only to enable device deployment; unset or any other value disables it |
+| `DEVICE_DEPLOY_PATH` | Separate absolute directory with its own `.env`, for example `/srv/reclaude-device` |
+
+The workflow condition also requires a non-empty `DEVICE_DEPLOY_PATH` that differs from
+the configured legacy `DEPLOY_PATH`; the upload step rejects paths that resolve to the
+same location. Existing `DEPLOY_ENABLED`, `DEPLOY_PATH`, and `DEPLOY_*` values do not trigger the device job. The
+device path must not reuse the legacy database directory or `.env`; prepare
+`data-device/postgres` ownership there as described in first-time server setup, using the
+device directory as the working directory. The device Compose file keeps cookies, logs,
+and update state under its own `data-device/` tree.
 
 The image publish job uses the workflow `GITHUB_TOKEN` with `packages:write`. This token
 is used only by GitHub Actions to publish the image; it is never copied to the host, and
 the production server does not need a registry token.
 
-Before saving `DEPLOY_KNOWN_HOSTS`, verify the server's SSH host key fingerprint through
+Before saving `DEVICE_DEPLOY_KNOWN_HOSTS`, verify the server's SSH host key fingerprint through
 an independent trusted channel. For example, compare the output of
-`ssh-keygen -lf <(ssh-keyscan -t ed25519 "$DEPLOY_HOST" 2>/dev/null)` with the provider's
+`ssh-keygen -lf <(ssh-keyscan -t ed25519 "$DEVICE_DEPLOY_HOST" 2>/dev/null)` with the provider's
 console or an out-of-band administrator record. Store only the verified `known_hosts`
 line(s); do not accept an unexpected first-connection fingerprint.
 
-## First deployment
+## Device channel setup
+
+The device job is disabled by default. To enable it deliberately, prepare a separate
+`DEVICE_DEPLOY_PATH` with its own `.env` and PostgreSQL database. Set its `DATABASE_URL`
+to `postgresql+asyncpg://...@db:5432/...`; do not point it at the legacy PostgreSQL
+directory. Create `data-device/postgres` and assign it the UID/GID used by the PostgreSQL
+image as described in first-time server setup. The bot image entrypoint manages the device
+Cookie and log directories. CI uploads only `docker-compose.device.yml` into this path as
+`docker-compose.yml` and uses the immutable `device-sha-<commit>` tag.
+
+The device Compose file defaults to `ghcr.io/bespertrijun/rec_tgbot:device-latest`. It has
+its own Compose project and `data-device/` mounts. Like the legacy Compose file, it mounts
+the Docker socket for the admin-only `/update` command; remove that mount manually to
+disable self-update. The socket remains host-root-equivalent.
+After CI upload, an operator can inspect or start this isolated stack with:
+
+```sh
+cd "$DEVICE_DEPLOY_PATH"
+docker compose config --quiet
+docker compose pull bot
+docker compose up -d
+```
+
+Do not set `DEVICE_DEPLOY_ENABLED=true` until the [device-ledger rollout gate](device-ledger-rollout.md)
+has been completed. The old `DEPLOY_ENABLED` variable has no effect on this job.
+The device deployment does not stop a bot running from the legacy path. Stop the old bot
+process/container before starting this one; `/stoptask` and `/stopstats` leave Telegram
+polling active, and both versions must not poll with the same bot token at the same time.
+
+## Legacy Compose deployment
 
 The target directory must already contain the server `.env`. From a checked-out copy of
 the repository, an operator can perform the first deployment with:
@@ -160,38 +213,41 @@ currently running stack still contains important data in a named volume, stop an
 perform a separately reviewed backup/migration before switching mounts; do not assume
 the new empty bind directory contains that data.
 
-The automated job follows the same sequence and pins `BOT_IMAGE` to the commit SHA. It
-only transfers the Compose file and atomically replaces the previous copy. Verify `docker compose ps`
-shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
-restore, complete the read-only checks with `/account`, explicitly select and reconcile a
-healthy account with `/use <account_id>`, then send `/starttask` from an administrator account
-to enable quota writes. `/stoptask` persists the stopped state across restarts; group onboarding
-and usage sync continue while the quota task is stopped. Use `/stopstats` to pause the usage sync
-itself (also persisted across restarts) and `/startstats` to resume it.
+The current workflow does not upload this legacy Compose file or deploy it. Verify
+`docker compose ps` shows both `db` and `bot` running. On every initial start, restart, upgrade, rollback, or
+restore, complete the read-only checks with `/account`. In device mode, `/use <account_id>`
+chooses the initial healthy account and leaves all quota tasks STOPPED; later account switches
+are refused. Send `/starttask` from an administrator account only after completing the rollout
+gate. `/stoptask` persists the stopped state across restarts; device sampling continues while a
+task is STOPPED. Use `/stopstats` to pause the usage and cycle sampling loop (also persisted
+across restarts) and `/startstats` to resume it.
 
 ## Upgrade and rollback
 
-Every successful `main` build publishes both `ghcr.io/bespertrijun/rec_tgbot:latest` and
-`ghcr.io/bespertrijun/rec_tgbot:sha-<commit>`. The deployment job uses the immutable SHA
-tag. To manually select a version without changing `.env`:
+The current workflow publishes only
+`ghcr.io/bespertrijun/rec_tgbot:device-latest` and
+`ghcr.io/bespertrijun/rec_tgbot:device-sha-<commit>`. It leaves the legacy `latest` tag
+untouched. To manually select an isolated device image without changing `.env`:
 
 ```sh
-export BOT_IMAGE=ghcr.io/bespertrijun/rec_tgbot:sha-COMMIT_SHA
+cd "$DEVICE_DEPLOY_PATH"
+export DEVICE_BOT_IMAGE=ghcr.io/bespertrijun/rec_tgbot:device-sha-COMMIT_SHA
 docker compose pull bot
 docker compose up -d bot
 docker compose ps
 ```
 
-Use the previous known-good SHA for a rollback. Re-run `/account`, `/use <account_id>`, and
+Use the previous known-good device SHA for a device-channel rollback. Re-run `/account`, `/use <account_id>`, and
 `/starttask` only after reviewing the persisted task state and account health. Never roll back by copying a Cookie or `.env`
 from another host.
 
 ### Self-update via the `/update` admin command (optional)
 
-The production Compose file mounts the host Docker socket and an update state
-directory (`./data/update`) into the bot container, which enables the admin-only
-`/update` command. One-time prerequisite: recreate the bot container with the
-updated Compose file (`docker compose up -d bot`) so the mounts take effect.
+The legacy Compose file and the separate device Compose file mount the host Docker socket
+and their own update state directory into the bot container, which enables the admin-only
+`/update` command. Remove the relevant socket mount manually to disable it. One-time
+prerequisite: recreate the bot container with the selected Compose file so the mounts take
+effect.
 
 Sending `/update` from an administrator account then:
 
@@ -273,7 +329,9 @@ docker compose exec -T db \
 ```
 
 Keep dumps, `data/cookies`, and `data/logs` access-restricted. After restoring a dump, the service
-must remain write-disabled while operators verify the account, perform a full members
-snapshot and cycle-baseline reconcile, and then explicitly send `/account`.
+must remain write-disabled while operators verify the selected account and device-cycle
+evidence. Reconcile unresolved REVOKE actions from the full organization device list, then
+explicitly start only the reviewed device tasks. Do not synthesize device ledgers from legacy
+member snapshots or cycle baselines; follow the rollout gate if legacy balances must be retained.
 See [the Cookie recovery runbook](cookie-runbook.md) and [operations notes](operations.md)
 for the failure gates and restore procedure.

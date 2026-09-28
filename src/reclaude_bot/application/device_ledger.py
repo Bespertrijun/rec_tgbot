@@ -100,6 +100,64 @@ class DeviceLedgerService:
                     )
                 return self._result(ledger, segment)
 
+    async def initialize_reset_baseline(
+        self,
+        session: AsyncSession,
+        association_id: int,
+        cycle_id: int,
+        snapshot: DeviceUsageSnapshot,
+    ) -> DeviceLedgerResult:
+        self._validate_id(association_id, "设备关联 ID")
+        self._validate_id(cycle_id, "设备周期 ID")
+        hint = await session.get(DeviceAssociation, association_id)
+        if hint is None:
+            raise EligibilityError("重置基线设备关联不存在")
+        now = self._now()
+        context = await self._locked_context(
+            session,
+            association_id,
+            cycle_id,
+            _AssociationHint(user_id=hint.user_id, task_id=hint.task_id),
+            now,
+        )
+        sampled_at = ensure_utc(snapshot.sampled_at)
+        baseline = self._stored_money(snapshot.total_usd)
+        if (
+            context.cycle.status != "VERIFIED"
+            or not context.cycle_started_at <= now < context.reset_at
+            or snapshot.org_id != self.org_id
+            or snapshot.device_id != context.association.device_id
+            or snapshot.range != "all"
+            or sampled_at < context.segment_started_at
+            or sampled_at > now
+        ):
+            raise EligibilityError("重置基线来源或设备周期已变化")
+
+        session.add(snapshot)
+        await session.flush()
+        ledger, segment, segments, segment_created, _ = await self._locked_ledger_segment(session, context)
+        if (
+            not segment_created
+            or len(segments) != 1
+            or ledger.confirmed_used_usd is not None
+            or ledger.quota_locked_at is not None
+            or ledger.quota_unlocked_at is not None
+        ):
+            raise EligibilityError("重置周期已存在设备账本，不能覆盖")
+
+        segment.baseline_total_usd = baseline
+        segment.baseline_captured_at = sampled_at
+        segment.latest_total_usd = baseline
+        segment.latest_sampled_at = sampled_at
+        segment.confirmed_used_usd = _ZERO
+        segment.imported_used_usd = _ZERO
+        segment.quality = "VERIFIED"
+        ledger.confirmed_used_usd = _ZERO
+        ledger.quality = "VERIFIED"
+        ledger.updated_at = now
+        self._refresh_ledger(ledger, segments, False, now)
+        return self._result(ledger, segment)
+
     async def apply(self, association_id: int, cycle_id: int, snapshot_id: int) -> DeviceLedgerResult:
         self._validate_id(association_id, "设备关联 ID")
         self._validate_id(cycle_id, "设备周期 ID")

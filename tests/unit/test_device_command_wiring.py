@@ -31,7 +31,7 @@ def test_new_device_commands_and_existing_commands_remain_registered():
     expected_user = {"start", "bind", "status", "send", "auth", "deauth"}
     expected_admin = {"sync", "member", "setquota", "ban", "unban", "unbind", "audit", "groups", "account", "use",
                       "newtask", "deltatask", "task", "starttask", "stoptask", "startstats", "stopstats", "addtaskmember",
-                      "deletetaskmember", "settaskquota", "taskusers", "update", "recovery_enable", "device", "authuser", "deauthuser"}
+                      "deletetaskmember", "settaskquota", "taskusers", "update", "recovery_enable", "device", "authuser", "deauthuser", "reset"}
     assert expected_user <= user.keys()
     # The group router owns /groups; the existing shared account callback owns /account.
     assert (expected_admin - {"groups"}) <= admin.keys()

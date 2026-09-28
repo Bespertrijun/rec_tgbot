@@ -16,6 +16,7 @@ from reclaude_bot.application.device_cycle import DeviceCycleService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.application.device_metering import DeviceMeteringService
 from reclaude_bot.application.device_quota import DeviceQuotaService
+from reclaude_bot.application.device_reset import DeviceTaskResetService
 from reclaude_bot.application.device_revocation import DeviceRevocationService
 from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.device_task_members import DeviceTaskMemberService
@@ -141,6 +142,12 @@ async def run() -> None:
         before_authorize=device_cycle.sync,
     )
     device_task_members = DeviceTaskMemberService(session_factory, settings.reclaude_org_id)
+    device_reset = DeviceTaskResetService(
+        session_factory,
+        gateway,
+        device_cycle,
+        settings.reclaude_org_id,
+    )
     admin = AdminService(session_factory, quota, task=task)
     jobs = BackgroundJobs(
         quota,
@@ -167,6 +174,7 @@ async def run() -> None:
     dp["device_admin"] = device_admin
     dp["device_revocation"] = device_revocation
     dp["device_task_members"] = device_task_members
+    dp["device_reset"] = device_reset
     dp["groups"] = groups
     dp["onboarding"] = onboarding
     dp["onboarding_worker"] = onboarding_worker

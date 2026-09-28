@@ -38,6 +38,7 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("newtask", "新建限额任务"),
     ("deltatask", "删除限额任务"),
     ("task", "查看限额任务状态"),
+    ("reset", "重置当前任务本地计费周期"),
     ("starttask", "启动限额任务"),
     ("stoptask", "停止限额任务"),
     ("startstats", "启动数据统计"),

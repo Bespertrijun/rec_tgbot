@@ -82,3 +82,28 @@ stdout contains JSON structlog events with request/job IDs and no Cookies, full 
 response bodies, or authorization headers. Repeated device-usage GET failure logs include
 only association/job IDs, the attempt count, and a fixed safe error code. Mutating actions
 are also immutable rows in `audit_logs`.
+
+
+## Reset a device task's local quota period
+
+In an administrator private chat, send `/reset <task-name>` (for example,
+`/reset device`). If REC itself needs a quota reset, perform it there first. This
+command only changes the bot's accounting; it does not request a REC quota reset,
+approve devices, or revoke devices.
+
+The bot reads the current account period and every still-active associated device's
+`range=all` total before committing. It closes the old local period and creates a
+new one ending at REC's reported weekly reset time. New usage is zero and each
+user's effective allowance returns to the task's configured amount; old adjustments
+and transfers remain in history and do not carry over. Active devices use the newly
+collected totals as their baselines, so subsequent usage alone counts. Bindings,
+member scope, task running/stopped state, and the write latch are preserved.
+
+A failed required query or changed device/account state aborts the reset without
+partially clearing users' balances. Resolve pending/unknown authorization or revoke
+operations before resetting. A repeated delivery of the same Telegram command is
+idempotent; sending a new `/reset` message intentionally starts another local period,
+even within the same REC week. Historical ledgers remain available. Eligible users
+previously revoked for quota receive the existing reauthorization notification on
+the next statistics round; they must manually `/auth` again. If statistics are
+paused, notifications wait until `/startstats` resumes the loop.

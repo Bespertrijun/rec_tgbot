@@ -10,6 +10,7 @@ from reclaude_bot.application.actions import DeviceQuotaActionService
 from reclaude_bot.application.device import DeviceAuthorizationService
 from reclaude_bot.application.device_admin import DeviceAdminService
 from reclaude_bot.application.device_cycle import DeviceCycleService
+from reclaude_bot.application.device_reset import DeviceTaskResetService
 from reclaude_bot.config import Settings
 from reclaude_bot.infrastructure.reclaude.fake import FakeReclaudeGateway
 from reclaude_bot.jobs.scheduler import BackgroundJobs
@@ -77,6 +78,7 @@ async def test_main_injects_device_services_fresh_query_and_write_gate_without_l
         monkeypatch.setattr(main, name, AsyncMock())
     await main.run()
     values = list(dispatchers[0].values())
+    assert isinstance(dispatchers[0]["device_reset"], DeviceTaskResetService)
     auth = next(value for value in values if isinstance(value, DeviceAuthorizationService))
     admin = next(value for value in values if isinstance(value, DeviceAdminService))
     actions = jobs_created[0].device_actions

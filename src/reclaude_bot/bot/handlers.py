@@ -20,6 +20,7 @@ from reclaude_bot.application.device import DeviceAuthorizationService
 from reclaude_bot.application.device_admin import DeviceAdminService
 from reclaude_bot.application.device_cycle import DeviceCycleService
 from reclaude_bot.application.device_quota import DeviceQuotaService
+from reclaude_bot.application.device_reset import DeviceTaskResetService
 from reclaude_bot.application.device_revocation import DeviceRevocationService
 from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.device_task_members import DeviceTaskMemberService
@@ -584,6 +585,32 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer(html.escape(str(exc)))
         except Exception:
             await message.answer("任务状态暂时不可用。")
+
+    @router.message(Command("reset"))
+    async def reset_task(message: Message, command: CommandObject, device_reset: DeviceTaskResetService) -> None:
+        if not is_admin(message) or message.chat.type != "private":
+            return
+        values = (command.args or "").split()
+        if len(values) != 1:
+            await message.answer("用法：/reset 任务名")
+            return
+        try:
+            result = await device_reset.reset(
+                values[0],
+                message.from_user.id,  # type: ignore[union-attr]
+                operation_key=f"telegram:{message.chat.id}:{message.message_id}",
+            )
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+            return
+        except Exception:
+            await message.answer("本地周期重置失败，任务和账本未重置，请稍后重试。")
+            return
+        await message.answer(
+            f"任务 {html.escape(values[0])} 已重置为新本地周期：设备 {result.device_count} 个，"
+            f"范围内用户 {result.user_count} 个，REC 周期刷新 {_format_datetime(result.reset_at)}。"
+            "旧账本和审计历史已保留。"
+        )
 
     @router.message(Command("taskusers"))
     async def task_users(

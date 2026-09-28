@@ -29,6 +29,16 @@ class _CycleEvidence:
     source_valid: bool
 
 
+@dataclass(frozen=True)
+class DeviceCycleEvidence:
+    account_id: str | None
+    reset_at: datetime
+    percent: Decimal
+    source_valid: bool
+    request_started_at: datetime
+    received_at: datetime
+
+
 class DeviceCycleService:
     def __init__(
         self,
@@ -61,10 +71,9 @@ class DeviceCycleService:
 
     async def sync(self, task_name: str | None = None) -> DeviceQuotaCycle:
         context = await self.task_service.resolve_task(task_name)
-        request_started_at = self._now()
-        usage = await self.source.get_usage(self.org_id)
-        received_at = self._now()
-        evidence = self._validate_usage(usage, received_at)
+        evidence = await self.fetch_fresh_evidence()
+        request_started_at = evidence.request_started_at
+        received_at = evidence.received_at
 
         try:
             async with self.session_factory() as session:
@@ -150,6 +159,22 @@ class DeviceCycleService:
         except IntegrityError:
             raise EligibilityError("设备周期同步发生并发冲突，请重新查询") from None
 
+    async def fetch_fresh_evidence(self) -> DeviceCycleEvidence:
+        """Fetch and validate live account/cycle evidence without mutating local cycles."""
+
+        request_started_at = self._now()
+        usage = await self.source.get_usage(self.org_id)
+        received_at = self._now()
+        evidence = self._validate_usage(usage, received_at)
+        return DeviceCycleEvidence(
+            account_id=evidence.account_id,
+            reset_at=evidence.reset_at,
+            percent=evidence.percent,
+            source_valid=evidence.source_valid,
+            request_started_at=request_started_at,
+            received_at=received_at,
+        )
+
     async def current(self, task_name: str | None = None) -> DeviceQuotaCycle | None:
         context = await self.task_service.resolve_task(task_name)
         now = self._now()
@@ -218,11 +243,11 @@ class DeviceCycleService:
         )
 
     @staticmethod
-    def _cycle_status(evidence: _CycleEvidence) -> str:
+    def _cycle_status(evidence: _CycleEvidence | DeviceCycleEvidence) -> str:
         return CycleStatus.VERIFIED.value if evidence.source_valid else CycleStatus.NEEDS_REVIEW.value
 
     @staticmethod
-    def _last_day_allow(evidence: _CycleEvidence, now: datetime) -> bool:
+    def _last_day_allow(evidence: _CycleEvidence | DeviceCycleEvidence, now: datetime) -> bool:
         return bool(evidence.source_valid and is_last_24h(now, evidence.reset_at) and evidence.percent < Decimal("100"))
 
     async def _write_audit(

@@ -15,7 +15,7 @@ from reclaude_bot.application.device_context import SingleOrgTaskService
 from reclaude_bot.application.device_cycle import DeviceCycleEvidence, DeviceCycleService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import ensure_utc, is_last_24h
+from reclaude_bot.domain.quota import ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import (
     AuditLog,
     DeviceAction,
@@ -167,7 +167,7 @@ class DeviceTaskResetService:
         # baselines from two upstream accounts.
         final_evidence = await self.cycle_service.fetch_fresh_evidence()
         self._validate_evidence(final_evidence, target)
-        if self._normalized_reset_at(evidence.reset_at) != self._normalized_reset_at(final_evidence.reset_at):
+        if not same_cycle_reset(evidence.reset_at, final_evidence.reset_at):
             raise EligibilityError("重置期间 Reclaude 周期发生变化，不能提交任务重置")
         if any(item.sampled_at >= final_evidence.reset_at for item in baselines):
             raise EligibilityError("采集设备基线时当前 Reclaude 周期已重置，请重试")
@@ -559,10 +559,6 @@ class DeviceTaskResetService:
         actual_account_id = self.gateway.account_id
         if actual_account_id is None or str(actual_account_id).strip() != expected_account_id:
             raise EligibilityError("重置期间 Reclaude 账号发生变化")
-
-    @staticmethod
-    def _normalized_reset_at(value: datetime) -> datetime:
-        return ensure_utc(value).replace(microsecond=0)
 
     @staticmethod
     def _validated_account_id(account_id: str) -> str:

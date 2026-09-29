@@ -442,3 +442,27 @@ async def test_recovery_without_session_keeps_writes_closed_and_preserves_usage(
         assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == 20
         assert (await session.get(QuotaTask, 1)).status == ("RUNNING" if running else "STOPPED")
     rt.gateway.device_usage.assert_not_called()
+
+
+@pytest.mark.parametrize("seconds,allowed", [(-301, False), (-300, True), (300, True), (301, False)])
+async def test_reset_evidence_uses_same_five_minute_tolerance(lifecycle_db, seconds, allowed):
+    factory, _ = lifecycle_db
+    old = await ready_cycle(factory)
+    _, ledger_id = await metered_user(factory, old, "20")
+    rt = runtime(factory)
+    before = rt.gateway.me.return_value
+    after = account_snapshot(sampled_at=rt.clock[0], reset=NOW + timedelta(days=6, seconds=seconds)).me
+    rt.gateway.me.side_effect = [before, before, after]
+    if allowed:
+        await rt.reconcile()
+        assert await cycle_count(factory) == 2
+        assert (await latest_cycle(factory)).account_id == "8123"
+    else:
+        with pytest.raises(EligibilityError):
+            await rt.reconcile()
+        assert await cycle_count(factory) == 1
+        async with factory() as session:
+            state = await session.get(ServiceState, 1)
+            assert state.selected_account_id == "7022" and not state.write_enabled
+    async with factory() as session:
+        assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == 20

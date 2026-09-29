@@ -14,7 +14,7 @@ from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.device_context import DeviceTaskContext, OrgAccountSource, OrgAccountUsage, SingleOrgTaskService
 from reclaude_bot.domain.enums import CycleStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import as_decimal, ensure_utc, is_last_24h
+from reclaude_bot.domain.quota import as_decimal, ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import DeviceQuotaCycle, DeviceTaskScope, QuotaTask
 from reclaude_bot.infrastructure.reclaude.models import MeResponse
 
@@ -96,8 +96,7 @@ class DeviceCycleService:
 
                     if (
                         latest is not None
-                        and ensure_utc(evidence.reset_at).replace(microsecond=0)
-                        == ensure_utc(latest.reset_at).replace(microsecond=0)
+                        and same_cycle_reset(evidence.reset_at, latest.reset_at)
                     ):
                         if latest.account_id != evidence.account_id:
                             latest.status = CycleStatus.NEEDS_REVIEW.value

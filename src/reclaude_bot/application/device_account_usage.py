@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from reclaude_bot.application.audit import utcnow
 from reclaude_bot.application.device_context import OrgAccountSource, OrgAccountUsage
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import ensure_utc, estimate_window_total
+from reclaude_bot.domain.quota import ensure_utc, estimate_window_total, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import (
     DeviceCycleLedger,
     DeviceQuotaCycle,
@@ -134,7 +134,7 @@ class DeviceAccountUsageService:
             reason = "账号或周期变化"
         elif local.cycle.account_id is None or source.account_id != local.cycle.account_id:
             reason = "账号或周期变化"
-        elif source.weekly_reset_at.replace(microsecond=0) != local.cycle.reset_at.replace(microsecond=0):
+        elif not same_cycle_reset(source.weekly_reset_at, local.cycle.reset_at):
             reason = "账号或周期变化"
         elif local.managed_used_usd is None:
             reason = "无可用消费金额"
@@ -303,7 +303,7 @@ class DeviceAccountUsageService:
             source_reason = "账号快照时间无效"
         elif weekly_reset <= received_at or seven_day_reset <= received_at:
             source_reason = "账号周期已刷新"
-        elif weekly_reset.replace(microsecond=0) != seven_day_reset.replace(microsecond=0):
+        elif not same_cycle_reset(weekly_reset, seven_day_reset):
             source_reason = "账号 7天窗口与周期不一致"
         elif account.status.strip().casefold() != "bound" or weekly.is_active is not True or account_id is None:
             source_reason = "账号来源未核实"

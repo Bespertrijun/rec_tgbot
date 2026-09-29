@@ -30,6 +30,12 @@ def ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def same_cycle_reset(left: datetime, right: datetime) -> bool:
+    """Return whether two cycle reset timestamps are within the five-minute tolerance."""
+
+    return abs(ensure_utc(left) - ensure_utc(right)) <= timedelta(minutes=5)
+
+
 def is_last_24h(now: datetime, reset_at: datetime) -> bool:
     now_utc = ensure_utc(now)
     reset_utc = ensure_utc(reset_at)

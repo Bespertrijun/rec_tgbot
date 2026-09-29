@@ -337,3 +337,44 @@ async def test_cycle_expiring_during_account_request_invalidates_estimate(lifecy
     source.get_usage.side_effect = receive_after_reset
     result = await app.get_account_usage(1)
     assert result.estimated_total_usd is None
+
+
+@pytest.mark.parametrize("seconds,allowed", [(-301, False), (-300, True), (-1, True), (1, True), (300, True), (301, False)])
+@pytest.mark.parametrize("changed_time", ["upstream", "seven_day"])
+async def test_estimate_uses_five_minute_reset_tolerance(lifecycle_db, seconds, allowed, changed_time):
+    factory, _ = lifecycle_db
+    await seeded(factory, total="1205.51")
+    usage = source_usage(percent="73")
+    if changed_time == "upstream":
+        usage = source_usage(percent="73", reset=NOW + timedelta(days=6, seconds=seconds))
+    else:
+        usage.me.current_account.usage_snapshot.seven_day.resets_at += timedelta(seconds=seconds)
+    result = await service(factory, usage)[0].get_account_usage(1)
+    assert result.managed_used_usd == Decimal("1205.51")
+    if allowed:
+        assert result.estimated_total_usd == Decimal("1205.51") * 100 / 73
+        assert result.estimate_reason is None
+    else:
+        assert result.estimated_total_usd is None
+        assert result.estimate_reason in {"账号或周期变化", "账号 7天窗口与周期不一致"}
+
+
+async def test_one_second_drift_recovers_reported_estimate_after_sync(lifecycle_db):
+    from reclaude_bot.application.device_cycle import DeviceCycleService
+
+    factory, _ = lifecycle_db
+    cycle_id, _, ledger_id = await seeded(factory, total="1205.51")
+    async with factory.begin() as session:
+        cycle = await session.get(DeviceQuotaCycle, cycle_id)
+        original_reset = cycle.reset_at
+        cycle.status = "NEEDS_REVIEW"
+        cycle.weekly_percent = None
+    app, source = service(factory, source_usage(percent="73", reset=original_reset + timedelta(seconds=1)))
+    assert (await app.get_account_usage(1)).estimate_reason == "账号周期未核实"
+    recovered = await DeviceCycleService(factory, source, 178, clock=lambda: NOW).sync()
+    result = await app.get_account_usage(1)
+    assert recovered.id == cycle_id and recovered.status == "VERIFIED"
+    assert result.estimate_reason is None
+    assert result.estimated_total_usd.quantize(Decimal("0.01")) == Decimal("1651.38")
+    async with factory() as session:
+        assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == Decimal("1205.51")

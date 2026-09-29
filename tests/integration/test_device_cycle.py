@@ -126,14 +126,14 @@ async def test_malformed_cycle_source_never_creates_a_cycle(lifecycle_db, case):
     assert await cycles(factory) == []
 
 
-@pytest.mark.parametrize("change", ["account", "reset", "one_second"])
+@pytest.mark.parametrize("change", ["account", "reset", "over_tolerance"])
 async def test_source_change_within_current_cycle_does_not_reset_usage_period(lifecycle_db, change):
     factory, _ = lifecycle_db
     reset = NOW + timedelta(hours=12)
     service, source, clock = cycle_fixture(factory, snapshot(reset=reset))
     first = await service.sync()
     clock[0] += timedelta(seconds=1)
-    source.get_usage.return_value = snapshot(reset=reset + ({"reset": timedelta(hours=1), "one_second": timedelta(seconds=1)}.get(change, timedelta(0))),
+    source.get_usage.return_value = snapshot(reset=reset + ({"reset": timedelta(hours=1), "over_tolerance": timedelta(seconds=301)}.get(change, timedelta(0))),
                                              sampled_at=clock[0], account_id="8000" if change == "account" else "7022")
     current = await service.sync()
     assert current.id == first.id and len(await cycles(factory)) == 1
@@ -283,3 +283,38 @@ async def test_reset_fraction_drift_recovers_existing_cycle_without_resetting_sp
         ledger = await session.get(DeviceCycleLedger, ledger_id)
         assert ledger.confirmed_used_usd == Decimal("700")
         assert ledger.quota_locked_at == NOW and ledger.quota_unlocked_at is None
+
+
+@pytest.mark.parametrize("seconds", [-300, -1, 1, 300])
+async def test_five_minute_drift_recovers_cycle_preserving_spend_and_lock(lifecycle_db, seconds):
+    from tests.fixtures.device_runtime import metered_user, ready_cycle
+
+    factory, _ = lifecycle_db
+    cycle_id = await ready_cycle(factory)
+    _, ledger_id = await metered_user(factory, cycle_id, "700", locked=True)
+    async with factory.begin() as session:
+        row = await session.get(DeviceQuotaCycle, cycle_id)
+        row.status = "NEEDS_REVIEW"
+        row.weekly_percent = None
+    service, _, _ = cycle_fixture(factory, snapshot(reset=RESET + timedelta(seconds=seconds)))
+    result = await service.sync()
+    assert result.id == cycle_id and result.status == "VERIFIED"
+    assert result.reset_at == RESET and result.weekly_percent == Decimal("10")
+    assert len(await cycles(factory)) == 1
+    async with factory() as session:
+        ledger = await session.get(DeviceCycleLedger, ledger_id)
+        assert ledger.confirmed_used_usd == Decimal("700")
+        assert ledger.quota_locked_at == NOW
+
+
+async def test_small_successive_drifts_do_not_move_the_cycle_anchor(lifecycle_db):
+    factory, _ = lifecycle_db
+    service, source, clock = cycle_fixture(factory)
+    original = await service.sync()
+    for seconds, expected in [(240, "VERIFIED"), (480, "NEEDS_REVIEW"), (0, "VERIFIED")]:
+        clock[0] += timedelta(seconds=1)
+        source.get_usage.return_value = snapshot(reset=RESET + timedelta(seconds=seconds), sampled_at=clock[0])
+        result = await service.sync()
+        assert result.id == original.id and result.reset_at == RESET
+        assert result.status == expected
+    assert len(await cycles(factory)) == 1

@@ -258,7 +258,7 @@ async def test_recovery_rejects_multiple_accounts_without_configuring_id(app_con
     quota = QuotaService(factory, gateway, settings)
     recovery = RecoveryService(gate, quota, gateway, settings)
 
-    with pytest.raises(EligibilityError, match="尚未选择"):
+    with pytest.raises(EligibilityError, match="尚未确认 Reclaude 绑定账号"):
         await recovery.health_sync_reconcile_enable(1)
 
     assert gateway.account_id is None

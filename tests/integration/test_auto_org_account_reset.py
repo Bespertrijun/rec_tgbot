@@ -417,28 +417,28 @@ async def test_pending_reset_cannot_be_reopened_by_task_start(lifecycle_db):
             assert not state.write_enabled and state.selected_account_id == "7022"
 
 
-async def test_explicit_recovery_authenticates_before_inventory_lookup(lifecycle_db):
+@pytest.mark.parametrize("running", [False, True])
+async def test_recovery_without_session_keeps_writes_closed_and_preserves_usage(lifecycle_db, running):
     factory, _ = lifecycle_db
-    await ready_cycle(factory, running=False)
+    old = await ready_cycle(factory, running=running)
+    _, ledger_id = await metered_user(factory, old, "20")
     rt = runtime(factory, account_id=7022)
-    authenticated = False
-
-    async def authenticate():
-        nonlocal authenticated
-        authenticated = True
-        return rt.gateway.me.return_value
-
-    async def inventory():
-        if not authenticated:
-            raise AuthenticationCircuitOpen("session unavailable; explicit recovery required")
-        return accounts(7022)
-
-    rt.gateway.authenticate = AsyncMock(side_effect=authenticate)
-    rt.gateway.accounts.side_effect = inventory
+    # This command relies on an existing session. Authentication failures must
+    # preserve accounting and close writes.
+    rt.gateway.authenticate = AsyncMock()
+    rt.gateway.accounts.side_effect = AuthenticationCircuitOpen("session unavailable; explicit recovery required")
     handler = command_callbacks(build_admin_router(Settings(
         DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[999],
     )))["recovery_enable"]
     message = SimpleNamespace(from_user=SimpleNamespace(id=999), chat=SimpleNamespace(type="private"), answer=AsyncMock())
     await handler(message, SimpleNamespace(command="recovery_enable", args=None), rt.reconciler)
-    rt.gateway.authenticate.assert_awaited_once()
-    assert "STOPPED" in message.answer.await_args.args[0]
+    rt.gateway.authenticate.assert_not_awaited()
+    rt.gateway.accounts.assert_awaited_once()
+    assert "session unavailable" in message.answer.await_args.args[0]
+    assert await cycle_count(factory) == 1
+    async with factory() as session:
+        state = await session.get(ServiceState, 1)
+        assert not state.write_enabled and state.selected_account_id == "7022"
+        assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == 20
+        assert (await session.get(QuotaTask, 1)).status == ("RUNNING" if running else "STOPPED")
+    rt.gateway.device_usage.assert_not_called()

@@ -11,6 +11,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import event, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -153,7 +154,7 @@ def test_upgrade_preserves_legacy_rows_and_empty_downgrade_is_reversible(migrati
     command.upgrade(config, "head")
     after_tables, after_rows, version = asyncio.run(inspect_database(migration_url))
     assert after_tables == before_tables | NEW
-    assert version == "0016_account_notifications"
+    assert version == ScriptDirectory.from_config(config).get_current_head()
     assert {name: after_rows[name] for name in before_rows} == before_rows
     assert all(after_rows[name] == [] for name in NEW)
     assert asyncio.run(schema_diff(migration_url)) == []

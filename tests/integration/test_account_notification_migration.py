@@ -50,7 +50,9 @@ def test_notification_upgrade_preserves_history_and_empty_downgrade(migration_ur
 
 def test_notification_migration_enforces_dedupe_and_preserves_pending_delivery(migration_url):
     config = config_for(migration_url)
-    command.upgrade(config, "head")
+    # Exercise the notification migration's own downgrade guard, without first
+    # downgrading unrelated later revisions (SQLite DDL is not transactional).
+    command.upgrade(config, "0016_account_notifications")
     asyncio.run(inspect_database(migration_url, seed=True))
     asyncio.run(insert_notice(migration_url))
     with pytest.raises(IntegrityError):

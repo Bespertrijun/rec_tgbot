@@ -16,14 +16,12 @@
    the Bot user. Host mode `0600` does not prevent `root`, a rootful Docker daemon, or a
    privileged container process from reading the `.env` or jar.
 4. Run `/account` to authenticate and inspect the live `/accounts` inventory. This is
-   read-only and still displays a banned `current_account`. For the first device-mode
-   configuration, run `/use <account_id>` for one healthy bound record. It validates the
-   lifecycle, health, and ID, then persists the selected ID with quota writes closed. It
-   does not sync legacy `/members`, reset balances, or resume tasks. Re-selecting that same
-   account revalidates it; selecting a different account is refused. The legacy
-   `/recovery_enable` alias validates the selected account and keeps tasks STOPPED. Account
-   IDs come from each record's `account_id`, not its separate database `id`; no account ID
-   or email mask is configured in `.env`.
+   read-only and still displays a banned `current_account`. Device mode discovers the
+   single healthy bound record automatically from its `account_id`; no account ID or email
+   mask is configured in `.env`. The first cycle records that identity without clearing
+   existing history. When the bound ID changes, background reconciliation closes quota
+   writes, captures device baselines, and starts a new cycle before restoring only tasks
+   that were RUNNING. An ambiguous or failed inventory remains paused for retry.
 5. After a `401`, fix the dedicated session, run `/account`, verify the persisted account,
    and explicitly run `/starttask` for each task that should resume. The first `401` forces
    tasks to `STOPPED`; normal request paths never retry password login automatically. A

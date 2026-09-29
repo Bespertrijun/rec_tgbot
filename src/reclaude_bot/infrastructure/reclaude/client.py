@@ -484,7 +484,7 @@ class ReclaudeClient:
         return MembersResponse.model_validate(response.json())
 
     async def me(self) -> MeResponse:
-        response = await self._request("GET", "/api/app/me")
+        response = await self._request("GET", "/api/app/me", params={"org_id": self.org_id})
         return MeResponse.model_validate(response.json())
 
     async def accounts(self) -> AccountsResponse:

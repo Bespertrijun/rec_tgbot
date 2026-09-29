@@ -11,18 +11,29 @@ member snapshot; see the [device-ledger rollout gate](device-ledger-rollout.md).
 
 ## Account and recovery
 
-`/account` reads the current login and live account inventory. `/use <account_id>` selects
-the initial healthy bound account and leaves tasks STOPPED with the write latch closed.
-Using `/use` for the already selected account revalidates it. Selecting a different
-account is refused; the command does not reset balances, sync legacy members, or resume
-tasks. Replacing an account requires a separately reviewed cutover for existing device
-associations and unresolved REVOKE actions.
+In an administrator private chat, `/task [name]` reports task state and the live account
+inventory, including account IDs, full emails, lifecycle, and health. `/account [name]`
+remains a compatibility alias to the same handler and is no longer shown as a standalone
+menu item. Account inventory failures do not hide task details. `/status` keeps each
+user's personal device quota separate from the organization account summary; the latter
+contains only the masked current account email, bound status, 5-hour and 7-day windows,
+reset times, managed-device estimate, and snapshot time. The `/me` lookup is scoped to
+the configured organization ID.
+
+The configured organization is expected to have exactly one healthy bound account. The
+device loop, task start, and authorization checks discover that account from the live
+organization inventory; there is no manual account-selection command. When its
+`account_id` changes, the write latch closes, active device totals are captured as the
+new cycle baselines, and the task starts a new local accounting generation. Previous
+cycles remain history, a task that was STOPPED stays stopped, and a task that was RUNNING
+resumes only after the reset succeeds. An ambiguous or failed inventory leaves the old
+identity and history intact and retries with writes closed.
 
 A `401` forces all quota tasks to STOPPED and closes the write latch. After repairing the
-dedicated session, run `/account`, verify the persisted account, and explicitly start only
-the tasks that should resume. `/recovery_enable` is a compatibility alias that validates
-the selected account and leaves all tasks STOPPED. Normal API calls do not silently retry
-password login.
+dedicated session, run `/task` (or the compatibility alias `/account`), verify the
+persisted account, and explicitly start only the tasks that should resume.
+`/recovery_enable` rechecks the live bound account and leaves all tasks STOPPED. Normal
+API calls do not silently retry password login.
 
 An UNKNOWN AUTH remains reserved. Device-list queries never infer that an UNKNOWN AUTH
 succeeded, and users must not resend its authorization link. For manual or automatic
@@ -53,6 +64,23 @@ revocation schedules one follow-up at one hour, executed by the first due pollin
 Pending older staged follow-ups are consolidated into that schedule; completed history
 is retained. Failed requests retain the normal retry policy. Quota enforcement also
 runs on this five-minute loop, so it is not an instantaneous spending cutoff.
+
+`/taskusers` also shows the selected account's 5-hour and 7-day windows. Its optional
+weekly estimate is `confirmed device-ledger spend in the current local period * 100 /
+live 7-day utilization percent`. The numerator is summed once per user ledger for the
+whole task and period, so it includes associations that ended during the period and
+their confirmed post-revoke sample; it is independent of the current member scope and
+does not sum device-history totals or quota transfers. The display labels the result as
+an estimate based on managed device spend, not an upstream account limit.
+
+Unknown or review-state users do not hide other known ledger amounts. Missing ledgers,
+old samples, pending final samples, and imported spend are included whenever their
+user ledger already has a finite confirmed amount; unknown amounts are skipped rather
+than replaced with zero. The estimate is hidden only when there is no known spend,
+spend is zero, utilization is zero or invalid, the live account or reset time does not
+match the saved cycle, or the cycle changes across the request. Account-window lookup
+failures only remove this summary; the member ledger rows remain available. An empty
+current member scope still receives the account summary.
 
 The task's write state and `RecoveryGate.write_enabled` both guard automatic quota revoke.
 Manual `/deauth` and `/deauthuser` do not depend on the automatic write latch. Manual

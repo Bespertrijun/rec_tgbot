@@ -10,6 +10,9 @@ from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActi
 from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
 from reclaude_bot.application.device import DeviceAuthorizationService
+from reclaude_bot.application.device_account_notifications import DeviceAccountNotificationService
+from reclaude_bot.application.device_account_reconcile import DeviceAccountReconcileService
+from reclaude_bot.application.device_account_usage import DeviceAccountUsageService
 from reclaude_bot.application.device_admin import DeviceAdminService
 from reclaude_bot.application.device_context import SingleOrgAccountSource
 from reclaude_bot.application.device_cycle import DeviceCycleService
@@ -91,9 +94,15 @@ async def run() -> None:
     await recovery.restore_persisted_account(startup_state)
     task = QuotaTaskService(session_factory, gateway, org_id=settings.reclaude_org_id)
     device_quota = DeviceQuotaService(session_factory, settings.reclaude_org_id)
+    device_account_source = SingleOrgAccountSource(gateway, settings.reclaude_org_id)
     device_cycle = DeviceCycleService(
         session_factory,
-        SingleOrgAccountSource(gateway, settings.reclaude_org_id),
+        device_account_source,
+        settings.reclaude_org_id,
+    )
+    device_account_usage = DeviceAccountUsageService(
+        session_factory,
+        device_account_source,
         settings.reclaude_org_id,
     )
     device_collector = DeviceUsageCollector(session_factory, gateway, settings.reclaude_org_id)
@@ -125,13 +134,36 @@ async def run() -> None:
         alert_callback=operational_alert,
         gate=gate,
     )
+    device_account_notifications = DeviceAccountNotificationService(
+        session_factory,
+        user_notify_callback=user_notify,
+        admin_ids=settings.telegram_admin_ids,
+    )
+    device_reset = DeviceTaskResetService(
+        session_factory,
+        gateway,
+        device_cycle,
+        settings.reclaude_org_id,
+        account_notifications=device_account_notifications,
+    )
+    device_account_reconcile = DeviceAccountReconcileService(
+        session_factory,
+        gateway,
+        device_account_source,
+        device_cycle,
+        device_reset,
+        settings.reclaude_org_id,
+        gate=gate,
+        task_service=task,
+        account_notifications=device_account_notifications,
+    )
     device_authorization = DeviceAuthorizationService(
         session_factory,
         gateway,
         settings.reclaude_org_id,
         device_quota.quota_check,
         on_authorized=device_sampling.after_authorized,
-        before_authorize=device_cycle.sync,
+        before_authorize=device_account_reconcile.prepare,
     )
     device_admin = DeviceAdminService(
         session_factory,
@@ -139,15 +171,9 @@ async def run() -> None:
         settings.reclaude_org_id,
         device_quota.quota_check,
         on_authorized=device_sampling.after_authorized,
-        before_authorize=device_cycle.sync,
+        before_authorize=device_account_reconcile.prepare,
     )
     device_task_members = DeviceTaskMemberService(session_factory, settings.reclaude_org_id)
-    device_reset = DeviceTaskResetService(
-        session_factory,
-        gateway,
-        device_cycle,
-        settings.reclaude_org_id,
-    )
     admin = AdminService(session_factory, quota, task=task)
     jobs = BackgroundJobs(
         quota,
@@ -157,6 +183,8 @@ async def run() -> None:
         device_cycle=device_cycle,
         device_sampling=device_sampling,
         device_actions=device_quota_actions,
+        device_account_reconcile=device_account_reconcile,
+        device_account_notifications=device_account_notifications,
     )
     updater = UpdateService(settings)
     dp = Dispatcher()
@@ -168,7 +196,10 @@ async def run() -> None:
     dp["jobs"] = jobs
     dp["admin"] = admin
     dp["device_quota"] = device_quota
+    dp["device_account_usage"] = device_account_usage
     dp["device_cycle"] = device_cycle
+    dp["device_account_reconcile"] = device_account_reconcile
+    dp["device_account_notifications"] = device_account_notifications
     dp["device_sampling"] = device_sampling
     dp["device_auth"] = device_authorization
     dp["device_admin"] = device_admin
@@ -190,10 +221,13 @@ async def run() -> None:
         await jobs.start(start_quota=False)
         if await task.any_enabled():
             try:
-                await recovery.validate_selected_account()
+                await device_account_reconcile.reconcile()
             except Exception as exc:
-                await gate.force_stop("startup_task_validation_failed")
-                await operational_alert(f"限额任务启动校验失败，已保持 STOPPED：{exc}")
+                # Keep the durable task intent so the reconciler can retry on
+                # the next statistics tick; the reconcile failure reason keeps
+                # the write latch closed across this restart.
+                await gate.disable("account_reconcile_failed")
+                await operational_alert(f"限额任务账号核对失败，写操作已暂停并将自动重试：{exc}")
         # The quota loop always runs: usage sync continues while tasks are STOPPED;
         # resume_quota_task re-opens the write latch only when a task is RUNNING.
         await jobs.resume_quota_task()

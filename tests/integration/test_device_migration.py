@@ -27,7 +27,8 @@ NEW_B1 = {"device_task_scopes", "devices", "device_associations", "device_action
 NEW_B2 = {"device_quota_cycles", "device_cycle_ledgers", "device_usage_snapshots", "device_usage_segments",
           "device_quota_adjustments", "device_notifications", "device_resample_jobs"}
 NEW_C3 = {"device_task_members"}
-NEW = NEW_B1 | NEW_B2 | NEW_C3
+NEW_RESET_NOTICES = {"device_account_notifications"}
+NEW = NEW_B1 | NEW_B2 | NEW_C3 | NEW_RESET_NOTICES
 NOW = datetime(2026, 9, 28, tzinfo=UTC)
 
 
@@ -116,7 +117,7 @@ async def inspect_database(url, *, seed=False, populate=None):
         await engine.dispose()
 
 
-async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=True):
+async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=True, include_reset_notices=True):
     engine = create_async_engine(url)
     try:
         async with engine.connect() as connection:
@@ -125,6 +126,8 @@ async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=T
                     if name in {"imported_used_usd", "ck_device_usage_segments_imported_used_range"} and (not include_import or not include_c3 or not include_d2):
                         return False
                     if kind == "table":
+                        if name in NEW_RESET_NOTICES:
+                            return include_reset_notices and include_c3 and include_d2 and include_import
                         return name in (NEW if include_c3 else NEW_B1 | NEW_B2)
                     if not include_c3 and kind == "column" and name == "scope_mode" and obj.table.name == "device_task_scopes":
                         return False
@@ -150,7 +153,7 @@ def test_upgrade_preserves_legacy_rows_and_empty_downgrade_is_reversible(migrati
     command.upgrade(config, "head")
     after_tables, after_rows, version = asyncio.run(inspect_database(migration_url))
     assert after_tables == before_tables | NEW
-    assert version == "0015_device_usage_import"
+    assert version == "0016_account_notifications"
     assert {name: after_rows[name] for name in before_rows} == before_rows
     assert all(after_rows[name] == [] for name in NEW)
     assert asyncio.run(schema_diff(migration_url)) == []
@@ -443,7 +446,7 @@ def test_import_column_upgrade_preserves_old_usage_and_bindings(migration_url):
     asyncio.run(inspect_database(migration_url, seed=True, populate="action"))
     asyncio.run(populate_accounting(migration_url, "segment"))
     tables, rows, version = asyncio.run(inspect_database(migration_url))
-    command.upgrade(config, "head")
+    command.upgrade(config, "0015_device_usage_import")
     new_tables, new_rows, _ = asyncio.run(inspect_database(migration_url))
     assert new_tables == tables
     for name, old_rows in rows.items():
@@ -452,7 +455,7 @@ def test_import_column_upgrade_preserves_old_usage_and_bindings(migration_url):
             assert all(row[-1] is None for row in new_rows[name])
         else:
             assert new_rows[name] == old_rows
-    assert asyncio.run(schema_diff(migration_url)) == []
+    assert asyncio.run(schema_diff(migration_url, include_reset_notices=False)) == []
     command.downgrade(config, "0014_device_auth_result")
     assert asyncio.run(inspect_database(migration_url)) == (tables, rows, version)
 
@@ -460,7 +463,7 @@ def test_import_column_upgrade_preserves_old_usage_and_bindings(migration_url):
 @pytest.mark.parametrize("migration_url", ["postgresql"], indirect=True)
 def test_import_evidence_cannot_be_lost_by_downgrade(migration_url):
     config = config_for(migration_url)
-    command.upgrade(config, "head")
+    command.upgrade(config, "0015_device_usage_import")
     asyncio.run(inspect_database(migration_url, seed=True, populate="action"))
     asyncio.run(populate_accounting(migration_url, "segment"))
 

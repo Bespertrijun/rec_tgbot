@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
+from reclaude_bot.application.device_account_notifications import DeviceAccountNotificationService
 from reclaude_bot.application.device_context import SingleOrgTaskService
 from reclaude_bot.application.device_cycle import DeviceCycleEvidence, DeviceCycleService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
@@ -19,6 +20,7 @@ from reclaude_bot.infrastructure.db.models import (
     AuditLog,
     DeviceAction,
     DeviceAssociation,
+    DeviceCycleLedger,
     DeviceQuotaCycle,
     DeviceTaskMember,
     DeviceTaskScope,
@@ -96,6 +98,7 @@ class DeviceTaskResetService:
         org_id: int,
         *,
         clock=utcnow,
+        account_notifications: DeviceAccountNotificationService | None = None,
     ) -> None:
         self.session_factory = factory
         self.gateway = gateway
@@ -104,18 +107,22 @@ class DeviceTaskResetService:
         self.org_id = self.task_service.org_id
         self.ledger = DeviceLedgerService(factory, self.org_id, clock=clock)
         self.clock = clock
+        self.account_notifications = account_notifications
 
     async def reset(
         self,
         task_name: str,
-        operator_id: int,
+        operator_id: int | None,
         *,
         operation_key: str,
+        target_account_id: str | None = None,
     ) -> DeviceTaskResetResult:
-        if isinstance(operator_id, bool) or not isinstance(operator_id, int) or operator_id <= 0:
+        if operator_id is not None and (isinstance(operator_id, bool) or not isinstance(operator_id, int) or operator_id <= 0):
             raise EligibilityError("管理员 ID 无效")
         if not isinstance(operation_key, str) or not operation_key.strip() or len(operation_key) > 128:
             raise EligibilityError("reset operation_key 必须是 1 到 128 个非空字符")
+        if target_account_id is not None:
+            target_account_id = self._validated_account_id(target_account_id)
 
         context = await self.task_service.resolve_task(task_name)
         existing = await self._find_operation(operation_key)
@@ -126,8 +133,9 @@ class DeviceTaskResetService:
 
         plan = await self._read_plan(context.task_id, self._now(), lock=False)
         evidence = await self.cycle_service.fetch_fresh_evidence()
-        self._validate_evidence(evidence, plan.selected_account_id)
-        self._ensure_gateway_account(plan.selected_account_id)
+        target = target_account_id or plan.selected_account_id
+        self._validate_evidence(evidence, target)
+        self._ensure_gateway_account(target)
         cut_at = evidence.received_at
         if evidence.reset_at <= cut_at:
             raise EligibilityError("Reclaude 周期已重置，不能使用该响应重置任务")
@@ -136,9 +144,9 @@ class DeviceTaskResetService:
         for association in plan.associations:
             if self._now() >= evidence.reset_at:
                 raise EligibilityError("采集设备基线时当前 Reclaude 周期已重置，请重试")
-            self._ensure_gateway_account(plan.selected_account_id)
+            self._ensure_gateway_account(target)
             usage = await self.gateway.device_usage(association.device_id, self.org_id, range="all")
-            self._ensure_gateway_account(plan.selected_account_id)
+            self._ensure_gateway_account(target)
             sampled_at = self._now()
             total_usd, payload = self._validate_device_usage(usage)
             if sampled_at < cut_at or sampled_at >= evidence.reset_at:
@@ -153,13 +161,25 @@ class DeviceTaskResetService:
                 )
             )
 
+        # Recheck the live source after all network baselines.  The inventory
+        # can change independently of the local gateway routing hint while a
+        # multi-device reset is in flight; committing in that case would mix
+        # baselines from two upstream accounts.
+        final_evidence = await self.cycle_service.fetch_fresh_evidence()
+        self._validate_evidence(final_evidence, target)
+        if self._normalized_reset_at(evidence.reset_at) != self._normalized_reset_at(final_evidence.reset_at):
+            raise EligibilityError("重置期间 Reclaude 周期发生变化，不能提交任务重置")
+        if any(item.sampled_at >= final_evidence.reset_at for item in baselines):
+            raise EligibilityError("采集设备基线时当前 Reclaude 周期已重置，请重试")
+
         return await self._commit_reset(
             plan,
-            evidence,
+            final_evidence,
             cut_at,
             tuple(baselines),
             operator_id,
             operation_key,
+            target,
         )
 
     async def _commit_reset(
@@ -168,10 +188,11 @@ class DeviceTaskResetService:
         evidence: DeviceCycleEvidence,
         cut_at: datetime,
         baselines: tuple[_DeviceBaseline, ...],
-        operator_id: int,
+        operator_id: int | None,
         operation_key: str,
+        target_account_id: str,
     ) -> DeviceTaskResetResult:
-        self._ensure_gateway_account(plan.selected_account_id)
+        self._ensure_gateway_account(target_account_id)
         now = self._now()
         if evidence.reset_at <= now:
             raise EligibilityError("Reclaude 周期已重置，不能提交任务重置")
@@ -183,7 +204,7 @@ class DeviceTaskResetService:
             async with session.begin():
                 service_state = await session.get(ServiceState, 1, with_for_update=True)
                 if service_state is None:
-                    raise EligibilityError("尚未选择 Reclaude 账号，不能重置任务周期")
+                    raise EligibilityError("尚未确认 Reclaude 绑定账号，不能重置任务周期")
 
                 prior = await self._find_operation(operation_key, session=session)
                 if prior is not None:
@@ -199,11 +220,11 @@ class DeviceTaskResetService:
                     or str(service_state.selected_account_id).strip() != plan.selected_account_id
                     or not evidence.source_valid
                     or evidence.account_id is None
-                    or str(evidence.account_id).strip() != plan.selected_account_id
+                    or str(evidence.account_id).strip() != target_account_id
                     or ensure_utc(evidence.reset_at) <= cut_at
                 ):
                     raise EligibilityError("当前 Reclaude 账号或周期证据已变化，不能重置任务")
-                self._ensure_gateway_account(plan.selected_account_id)
+                self._ensure_gateway_account(target_account_id)
 
                 latest = await session.scalar(
                     select(DeviceQuotaCycle)
@@ -227,7 +248,7 @@ class DeviceTaskResetService:
                     reset_at=ensure_utc(evidence.reset_at),
                     created_at=now,
                     status="VERIFIED",
-                    account_id=plan.selected_account_id,
+                    account_id=target_account_id,
                     weekly_percent=evidence.percent,
                     last_day_allow=bool(
                         evidence.source_valid
@@ -257,6 +278,30 @@ class DeviceTaskResetService:
                         snapshot,
                     )
 
+                if self.account_notifications is not None and target_account_id != plan.selected_account_id:
+                    affected_user_ids = await self._affected_user_ids(session, plan, current)
+                    await self.account_notifications.queue_reset_success(
+                        session,
+                        task_id=plan.task_id,
+                        cycle_id=cycle.id,
+                        generation_key=operation_key,
+                        task_name=plan.task_name,
+                        account_id=target_account_id,
+                        previous_account_id=plan.selected_account_id,
+                        task_limit_usd=plan.task_limit_usd,
+                        reset_at=cycle.reset_at,
+                        affected_user_ids=affected_user_ids,
+                    )
+
+                # The new identity becomes durable in the same transaction as
+                # the new cycle and all device baselines.  A manual reset of
+                # the same account must preserve the caller's closed-latch
+                # reason.
+                if target_account_id != plan.selected_account_id:
+                    service_state.selected_account_id = target_account_id
+                    service_state.reason = "account_reconciled"
+                service_state.updated_at = now
+
                 await audit(
                     session,
                     actor_telegram_id=operator_id,
@@ -272,7 +317,7 @@ class DeviceTaskResetService:
                         "previous_reset_at": original_reset_at.isoformat() if original_reset_at else None,
                         "cut_at": cut_at.isoformat(),
                         "reset_at": ensure_utc(evidence.reset_at).isoformat(),
-                        "account_id": plan.selected_account_id,
+                        "account_id": target_account_id,
                         "device_count": len(current.associations),
                         "user_count": len(current.covered_user_ids),
                     },
@@ -310,7 +355,7 @@ class DeviceTaskResetService:
         if task is None or scope is None or scope.org_id != self.org_id:
             raise EligibilityError("任务未配置到当前 Reclaude 组织")
         if service_state is None or service_state.selected_account_id is None:
-            raise EligibilityError("尚未选择 Reclaude 账号，不能重置任务周期")
+            raise EligibilityError("尚未确认 Reclaude 绑定账号，不能重置任务周期")
 
         if scope.scope_mode not in {"ALL", "ALLOWLIST", "EXCLUDE"}:
             raise EligibilityError("设备任务成员范围配置无效")
@@ -332,20 +377,19 @@ class DeviceTaskResetService:
             excluded = set(listed_user_ids)
             covered_user_ids = tuple(user_id for user_id in all_user_ids if user_id not in excluded)
 
+        # If the bot was stopped until the upstream cycle expired, the latest
+        # historical cycle is still needed to identify the old account and
+        # establish the new generation.
         cycle_query = (
             select(DeviceQuotaCycle)
-            .where(
-                DeviceQuotaCycle.task_id == task_id,
-                DeviceQuotaCycle.started_at <= now,
-                DeviceQuotaCycle.reset_at > now,
-            )
-            .order_by(DeviceQuotaCycle.reset_at.desc())
+            .where(DeviceQuotaCycle.task_id == task_id)
+            .order_by(DeviceQuotaCycle.reset_at.desc(), DeviceQuotaCycle.id.desc())
             .limit(1)
         )
         if lock:
             cycle_query = cycle_query.with_for_update()
         cycle = await session.scalar(cycle_query)
-        if cycle is None or cycle.status not in {"VERIFIED", "NEEDS_REVIEW"}:
+        if cycle is None or cycle.status not in {"VERIFIED", "NEEDS_REVIEW", "EXPIRED"}:
             raise EligibilityError("当前没有可重置的本地设备周期")
         if (
             cycle.account_id is not None
@@ -462,6 +506,25 @@ class DeviceTaskResetService:
                 raise EligibilityError("已有重置操作记录不完整，不能安全重试") from None
         return None
 
+    async def _affected_user_ids(
+        self,
+        session: AsyncSession,
+        previous: _ResetPlan,
+        current: _ResetPlan,
+    ) -> tuple[int, ...]:
+        ledger_user_ids = set(
+            (
+                await session.scalars(
+                    select(DeviceCycleLedger.user_id).where(
+                        DeviceCycleLedger.task_id == previous.task_id,
+                        DeviceCycleLedger.cycle_id == previous.cycle_id,
+                    )
+                )
+            ).all()
+        )
+        active_user_ids = {association.user_id for association in current.associations}
+        return tuple(sorted(set(current.covered_user_ids) | ledger_user_ids | active_user_ids))
+
     @staticmethod
     def _same_plan(previous: _ResetPlan, current: _ResetPlan) -> bool:
         return (
@@ -496,6 +559,18 @@ class DeviceTaskResetService:
         actual_account_id = self.gateway.account_id
         if actual_account_id is None or str(actual_account_id).strip() != expected_account_id:
             raise EligibilityError("重置期间 Reclaude 账号发生变化")
+
+    @staticmethod
+    def _normalized_reset_at(value: datetime) -> datetime:
+        return ensure_utc(value).replace(microsecond=0)
+
+    @staticmethod
+    def _validated_account_id(account_id: str) -> str:
+        if not isinstance(account_id, str) or not account_id.strip() or len(account_id.strip()) > 128 or not account_id.strip().isdigit():
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        if int(account_id.strip()) <= 0:
+            raise EligibilityError("Reclaude 账号 ID 无效")
+        return account_id.strip()
 
     @staticmethod
     def _validate_device_usage(usage: ReclaudeDeviceUsage) -> tuple[Decimal, dict[str, object]]:

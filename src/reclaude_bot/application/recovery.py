@@ -214,7 +214,7 @@ class RecoveryService:
             await self.gate.disable("quota_task_start_validation")
             state = await self.gate.get_state()
             if state is None or state.selected_account_id is None:
-                raise EligibilityError("尚未选择 Reclaude 账号，请先使用 /use account_id")
+                raise EligibilityError("尚未确认 Reclaude 绑定账号，请先完成账号同步")
             self.gateway.account_id = None
             me = await self.gateway.authenticate()
             if not isinstance(me, MeResponse):

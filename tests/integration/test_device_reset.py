@@ -32,6 +32,7 @@ from tests.integration.test_device_cycle import snapshot as account_snapshot
 from tests.integration.test_device_ledger import NOW, association, end_association, snapshot
 from tests.integration.test_device_quota_actions import stack as action_stack
 from tests.integration.test_device_usage import usage
+from tests.unit.test_device_context import accounts
 
 pytestmark = pytest.mark.parametrize("lifecycle_db", ["postgresql"], indirect=True)
 RESET_MOMENT = NOW + timedelta(hours=1)
@@ -43,6 +44,7 @@ def runtime(factory, *, reset=None):
     clock = [RESET_MOMENT]
     gateway = SimpleNamespace(
         account_id="7022",
+        accounts=AsyncMock(return_value=accounts(7022)),
         me=AsyncMock(return_value=account_snapshot(sampled_at=RESET_MOMENT, reset=reset or NOW + timedelta(days=6)).me),
         device_usage=AsyncMock(return_value=usage("900")),
         approve_device_auth=AsyncMock(),
@@ -162,7 +164,7 @@ async def test_invalid_account_or_cycle_does_not_reset(lifecycle_db, case):
     await ready_cycle(factory)
     rt = runtime(factory)
     if case == "account_changed":
-        rt.gateway.account_id = "9999"
+        rt.gateway.accounts.return_value = accounts(9999)
     else:
         kwargs: dict[str, Any] = {"sampled_at": RESET_MOMENT}
         if case == "unbound":

@@ -675,6 +675,7 @@ class DeviceQuotaService:
         state = await session.get(ServiceState, 1)
         return bool(
             state is not None
+            and not (state.reason.startswith("account_reconcile_") and state.reason != "account_reconciled")
             and state.selected_account_id is not None
             and str(state.selected_account_id).strip() == cycle.account_id.strip()
         )

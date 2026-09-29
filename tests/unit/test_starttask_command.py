@@ -19,7 +19,7 @@ def _message() -> SimpleNamespace:
 def _deps(*, sync_enabled: bool) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace, SimpleNamespace]:
     command = SimpleNamespace(args="default")
     task = SimpleNamespace(resolve=AsyncMock(return_value="default"), sync_enabled=AsyncMock(return_value=sync_enabled))
-    recovery = SimpleNamespace(validate_selected_account=AsyncMock(return_value=SimpleNamespace(account_id=4949)))
+    recovery = SimpleNamespace(reconcile=AsyncMock(return_value=SimpleNamespace(account_id="4949")))
     jobs = SimpleNamespace(start_quota_task=AsyncMock())
     return command, task, recovery, jobs
 

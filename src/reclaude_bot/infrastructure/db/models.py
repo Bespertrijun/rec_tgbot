@@ -628,6 +628,79 @@ class DeviceNotification(Base):
     last_error_code: Mapped[str | None] = mapped_column(String(80))
 
 
+class DeviceAccountNotification(Base):
+    __tablename__ = "device_account_notifications"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('ACCOUNT_RESET_SUCCESS', 'ACCOUNT_RESET_FAILURE')",
+            name="ck_device_account_notifications_kind",
+        ),
+        CheckConstraint(
+            "recipient_type IN ('USER', 'ADMIN')",
+            name="ck_device_account_notifications_recipient_type",
+        ),
+        CheckConstraint("status IN ('PENDING', 'SENT', 'CANCELLED')", name="ck_device_account_notifications_status"),
+        CheckConstraint("attempt_count >= 0", name="ck_device_account_notifications_attempt_count_nonnegative"),
+        CheckConstraint(
+            "(status = 'SENT' AND sent_at IS NOT NULL) OR "
+            "(status <> 'SENT' AND sent_at IS NULL)",
+            name="ck_device_account_notifications_sent_time",
+        ),
+        Index(
+            "uq_device_account_notifications_user_generation",
+            "task_id",
+            "generation_key",
+            "kind",
+            "recipient_type",
+            "user_id",
+            unique=True,
+            postgresql_where=text("recipient_type = 'USER'"),
+            sqlite_where=text("recipient_type = 'USER'"),
+        ),
+        Index(
+            "uq_device_account_notifications_admin_user_generation",
+            "task_id",
+            "generation_key",
+            "kind",
+            "recipient_type",
+            "user_id",
+            "recipient_id",
+            unique=True,
+            postgresql_where=text("recipient_type = 'ADMIN' AND user_id IS NOT NULL"),
+            sqlite_where=text("recipient_type = 'ADMIN' AND user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_device_account_notifications_failure_admin_generation",
+            "task_id",
+            "generation_key",
+            "kind",
+            "recipient_type",
+            "recipient_id",
+            unique=True,
+            postgresql_where=text("kind = 'ACCOUNT_RESET_FAILURE' AND recipient_type = 'ADMIN'"),
+            sqlite_where=text("kind = 'ACCOUNT_RESET_FAILURE' AND recipient_type = 'ADMIN'"),
+        ),
+        Index("ix_device_account_notifications_pending", "status", "next_retry_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("quota_tasks.id"), nullable=False)
+    cycle_id: Mapped[int | None] = mapped_column(ForeignKey("device_quota_cycles.id"))
+    generation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    recipient_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    recipient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+
+
 class DeviceResampleJob(Base):
     __tablename__ = "device_resample_jobs"
     __table_args__ = (

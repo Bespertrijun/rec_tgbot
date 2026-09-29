@@ -17,6 +17,8 @@ from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.audit import utcnow
 from reclaude_bot.application.binding import BindingService, masked_email, normalize_email
 from reclaude_bot.application.device import DeviceAuthorizationService
+from reclaude_bot.application.device_account_reconcile import DeviceAccountReconcileService
+from reclaude_bot.application.device_account_usage import DeviceAccountUsage, DeviceAccountUsageService
 from reclaude_bot.application.device_admin import DeviceAdminService
 from reclaude_bot.application.device_cycle import DeviceCycleService
 from reclaude_bot.application.device_quota import DeviceQuotaService
@@ -33,7 +35,6 @@ from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError, EligibilityError
 from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import User
-from reclaude_bot.infrastructure.reclaude.models import AccountRecord
 from reclaude_bot.jobs.scheduler import BackgroundJobs
 
 log = structlog.get_logger(__name__)
@@ -99,7 +100,11 @@ def build_router(settings: Settings) -> Router:
             await message.answer("绑定失败：请确认在私聊中操作、邮箱格式正确且未被占用；账号受限请联系管理员。")
 
     @router.message(Command("status"))
-    async def status(message: Message, device_quota: DeviceQuotaService) -> None:
+    async def status(
+        message: Message,
+        device_quota: DeviceQuotaService,
+        device_account_usage: DeviceAccountUsageService | None = None,
+    ) -> None:
         try:
             if message.from_user is None:
                 return
@@ -138,19 +143,33 @@ def build_router(settings: Settings) -> Router:
             )
             limit = f"${value.effective_limit_usd:.2f}" if value.effective_limit_usd is not None else "未知"
             remaining = f"${value.remaining_usd:.2f}" if value.remaining_usd is not None else "未知"
-            await message.answer(
+            account_usage: DeviceAccountUsage | None = None
+            account_usage_unavailable_reason: str | None = None
+            if device_account_usage is None:
+                account_usage_unavailable_reason = "账号摘要未配置"
+            elif value.task_id is None:
+                account_usage_unavailable_reason = "用户当前没有任务"
+            else:
+                try:
+                    account_usage = await device_account_usage.get_account_usage(value.task_id)
+                except Exception as exc:
+                    log.warning("user_account_usage_failed", error_type=type(exc).__name__)
+                    account_usage_unavailable_reason = "上游查询失败"
+            lines = [
                 f"邮箱：{(local[:1] or '*')}***@{domain}\n"
                 f"授权状态：{auth_state}\n"
                 f"设备：{device}\n"
                 f"任务：{html.escape(value.task_name or '未配置')}\n"
-                f"本周期已用：{used}\n"
-                f"当前额度：{limit}\n"
-                f"剩余额度：{remaining}\n"
+                f"个人本周期已用：{used}\n"
+                f"个人当前额度：{limit}\n"
+                f"个人剩余额度：{remaining}\n"
                 f"数据质量：{html.escape(value.quality)}\n"
                 f"额度锁定：{'是' if value.quota_locked else '否'}\n"
                 f"最近采样：{_format_datetime(value.last_sampled_at)}\n"
-                f"周期刷新：{_format_datetime(value.reset_at)}"
-            )
+                f"周期刷新：{_format_datetime(value.reset_at)}",
+                *_device_account_usage_lines(account_usage, unavailable_reason=account_usage_unavailable_reason),
+            ]
+            await _answer_lines(message, lines)
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
 
@@ -272,10 +291,16 @@ def build_admin_router(settings: Settings) -> Router:
         return message.from_user is not None and message.from_user.id in settings.telegram_admin_ids
 
     @router.message(Command("sync"))
-    async def sync(message: Message, device_cycle: DeviceCycleService, device_sampling: DeviceSamplingService) -> None:
+    async def sync(
+        message: Message,
+        device_account_reconcile: DeviceAccountReconcileService,
+        device_cycle: DeviceCycleService,
+        device_sampling: DeviceSamplingService,
+    ) -> None:
         if not is_admin(message):
             return
         try:
+            await device_account_reconcile.reconcile(operator_id=message.from_user.id)  # type: ignore[union-attr]
             cycle = await device_cycle.sync()
             samples = await device_sampling.tick()
             percent = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
@@ -465,25 +490,6 @@ def build_admin_router(settings: Settings) -> Router:
         rows = await admin.recent_audit()
         await message.answer("\n".join(f"{_format_datetime(row.created_at)} {row.action} {row.result}" for row in rows) or "暂无审计记录")
 
-    @router.message(Command("use"))
-    async def use_account(message: Message, command: CommandObject, recovery: RecoveryService) -> None:
-        if not is_admin(message):
-            return
-        account_id = (command.args or "").strip()
-        if not account_id:
-            await message.answer("用法：/use account_id（请先使用 /account 查看实时账号）")
-            return
-        try:
-            account = await recovery.select_account(account_id, message.from_user.id)  # type: ignore[union-attr]
-            await message.answer(
-                f"Reclaude 账号 {account.account_id} 已校验并选择。任务保持 STOPPED，写闸未开启；"
-                "设备周期和用量将由本地统计循环同步。旧余额不会在此操作中重置或迁移。"
-            )
-        except DomainError as exc:
-            await message.answer(f"账号选择失败：{html.escape(str(exc))}")
-        except Exception:
-            await message.answer("账号选择失败，写操作仍已暂停，请检查 Reclaude 登录、账号状态和成员同步。")
-
     @router.message(Command("newtask"))
     async def new_task(message: Message, command: CommandObject, task: QuotaTaskService) -> None:
         if not is_admin(message):
@@ -518,7 +524,7 @@ def build_admin_router(settings: Settings) -> Router:
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
 
-    @router.message(Command("task"))
+    @router.message(Command("task", "account"))
     async def task_status(
         message: Message,
         command: CommandObject,
@@ -527,64 +533,80 @@ def build_admin_router(settings: Settings) -> Router:
         device_cycle: DeviceCycleService,
         recovery: RecoveryService,
     ) -> None:
-        if not is_admin(message):
+        if not is_admin(message) or message.chat.type != "private":
             return
         try:
             name_arg = (command.args or "").strip() or None
             if name_arg is None:
                 snapshots = await task.list_tasks()
                 if not snapshots:
-                    await message.answer("暂无限额任务，请先使用 /newtask 创建。")
-                    return
-                lines = [f"限额任务：{len(snapshots)} 个"]
-                for item in snapshots:
-                    if item.scope_mode == ALLOWLIST:
-                        scope = f"范围 ALLOWLIST | 成员 {len(item.member_ids)} 个"
-                    elif item.scope_mode == EXCLUDE:
-                        scope = f"范围 EXCLUDE | 排除 {len(item.member_ids)} 个"
-                    else:
-                        scope = "范围 ALL"
-                    lines.append(f"- {html.escape(item.name)} | {'RUNNING' if item.enabled else 'STOPPED'} | {scope} | 额度 ${item.limit_usd:.2f}")
-                await message.answer("\n".join(lines))
-                return
-            name = await task.resolve(name_arg)
-            snapshot = await task.snapshot(name)
-            runtime = jobs.status()
-            state = await recovery.gate.get_state()
-            lines = [f"任务 {html.escape(snapshot.name)}：{'RUNNING' if snapshot.enabled else 'STOPPED'}"]
-            lines.append(f"任务额度：${snapshot.limit_usd:.2f}")
-            lines.append(f"调度循环：{'运行中' if runtime['loop_running'] else '未运行'}")
-            lines.append(f"最近启动：{_format_datetime(runtime['started_at'])}")
-            lines.append(f"最近 tick 开始：{_format_datetime(runtime['last_tick_started'])}")
-            lines.append(f"最近 tick 完成：{_format_datetime(runtime['last_tick_finished'])}")
-            lines.append(f"最近 tick 错误：{html.escape(str(runtime['last_tick_error'] or '无'))}")
-            lines.append(f"最近结果数：{runtime['last_result_count'] if runtime['last_result_count'] is not None else 'unknown'}")
-            if snapshot.scope_mode == ALLOWLIST:
-                scope = ", ".join(snapshot.member_ids) if snapshot.member_ids else "(empty)"
-                lines.append(f"成员范围：ALLOWLIST {html.escape(scope)}")
-                if snapshot.missing_member_ids:
-                    lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
-            elif snapshot.scope_mode == EXCLUDE:
-                excluded = ", ".join(snapshot.member_ids) if snapshot.member_ids else "(empty)"
-                lines.append(f"成员范围：EXCLUDE（排除：{html.escape(excluded)}）")
-                if snapshot.missing_member_ids:
-                    lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
+                    lines = ["暂无限额任务，请先使用 /newtask 创建。"]
+                else:
+                    lines = [f"限额任务：{len(snapshots)} 个"]
+                    for item in snapshots:
+                        if item.scope_mode == ALLOWLIST:
+                            scope = f"范围 ALLOWLIST | 成员 {len(item.member_ids)} 个"
+                        elif item.scope_mode == EXCLUDE:
+                            scope = f"范围 EXCLUDE | 排除 {len(item.member_ids)} 个"
+                        else:
+                            scope = "范围 ALL"
+                        lines.append(
+                            f"- {html.escape(item.name)} | {'RUNNING' if item.enabled else 'STOPPED'} | "
+                            f"{scope} | 额度 ${item.limit_usd:.2f}"
+                        )
             else:
-                lines.append("成员范围：ALL")
-            selected = state.selected_account_id if state is not None else None
-            lines.append(f"Reclaude 账号：{html.escape(str(selected)) if selected else '未选择'}")
-            lines.append(f"写闸门状态：{'开启' if state is not None and state.write_enabled else '关闭'}（{html.escape(str(state.reason)) if state is not None else 'unknown'}）")
-            cycle = await device_cycle.current(name)
-            if cycle is None:
-                lines.append("当前设备周期：尚未同步")
-            else:
-                weekly = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
-                lines.append(f"设备周期：{cycle.status} | 周用量 {weekly} | 刷新 {_format_datetime(cycle.reset_at)}")
-            await message.answer("\n".join(lines))
+                name = await task.resolve(name_arg)
+                snapshot = await task.snapshot(name)
+                runtime = jobs.status()
+                state = await recovery.gate.get_state()
+                lines = [f"任务 {html.escape(snapshot.name)}：{'RUNNING' if snapshot.enabled else 'STOPPED'}"]
+                lines.append(f"任务额度：${snapshot.limit_usd:.2f}")
+                lines.append(f"调度循环：{'运行中' if runtime['loop_running'] else '未运行'}")
+                lines.append(f"最近启动：{_format_datetime(runtime['started_at'])}")
+                lines.append(f"最近 tick 开始：{_format_datetime(runtime['last_tick_started'])}")
+                lines.append(f"最近 tick 完成：{_format_datetime(runtime['last_tick_finished'])}")
+                lines.append(f"最近 tick 错误：{html.escape(str(runtime['last_tick_error'] or '无'))}")
+                lines.append(f"最近结果数：{runtime['last_result_count'] if runtime['last_result_count'] is not None else 'unknown'}")
+                if snapshot.scope_mode == ALLOWLIST:
+                    scope = ", ".join(snapshot.member_ids) if snapshot.member_ids else "(empty)"
+                    lines.append(f"成员范围：ALLOWLIST {html.escape(scope)}")
+                    if snapshot.missing_member_ids:
+                        lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
+                elif snapshot.scope_mode == EXCLUDE:
+                    excluded = ", ".join(snapshot.member_ids) if snapshot.member_ids else "(empty)"
+                    lines.append(f"成员范围：EXCLUDE（排除：{html.escape(excluded)}）")
+                    if snapshot.missing_member_ids:
+                        lines.append(f"已消失成员：{html.escape(', '.join(snapshot.missing_member_ids))}")
+                else:
+                    lines.append("成员范围：ALL")
+                selected = state.selected_account_id if state is not None else None
+                lines.append(f"Reclaude 账号：{html.escape(str(selected)) if selected else '未选择'}")
+                lines.append(
+                    f"写闸门状态：{'开启' if state is not None and state.write_enabled else '关闭'}"
+                    f"（{html.escape(str(state.reason)) if state is not None else 'unknown'}）"
+                )
+                cycle = await device_cycle.current(name)
+                if cycle is None:
+                    lines.append("当前设备周期：尚未同步")
+                else:
+                    weekly = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
+                    lines.append(f"设备周期：{cycle.status} | 周用量 {weekly} | 刷新 {_format_datetime(cycle.reset_at)}")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
+            return
         except Exception:
             await message.answer("任务状态暂时不可用。")
+            return
+
+        try:
+            lines.extend(await _account_inventory_lines(recovery))
+        except DomainError as exc:
+            log.warning("reclaude_account_listing_failed", error_type=type(exc).__name__)
+            lines.append(f"账号查询失败：{html.escape(str(exc))}")
+        except Exception as exc:
+            log.warning("reclaude_account_listing_failed", error_type=type(exc).__name__)
+            lines.append("账号查询失败，请检查 Reclaude 登录和会话状态。")
+        await _answer_lines(message, lines)
 
     @router.message(Command("reset"))
     async def reset_task(message: Message, command: CommandObject, device_reset: DeviceTaskResetService) -> None:
@@ -619,12 +641,36 @@ def build_admin_router(settings: Settings) -> Router:
         task: QuotaTaskService,
         device_task_members: DeviceTaskMemberService,
         device_quota: DeviceQuotaService,
+        device_account_usage: DeviceAccountUsageService | None = None,
     ) -> None:
         if not is_admin(message) or message.chat.type != "private":
             return
         try:
             name = await task.resolve((command.args or "").strip() or None)
             snapshot = await task.snapshot(name)
+        except DomainError as exc:
+            await message.answer(html.escape(str(exc)))
+            return
+        except Exception as exc:
+            log.error(
+                "task_usage_context_failed",
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
+            await message.answer("任务成员使用状况暂时不可用。")
+            return
+
+        try:
+            account_usage = (
+                await device_account_usage.get_account_usage(snapshot.id)
+                if device_account_usage is not None
+                else None
+            )
+        except Exception as exc:
+            log.warning("task_account_usage_failed", error_type=type(exc).__name__)
+            account_usage = None
+
+        try:
             members = await device_task_members.snapshot(name)
             async with device_quota.session_factory() as session:
                 users = list(
@@ -645,18 +691,21 @@ def build_admin_router(settings: Settings) -> Router:
             )
             await message.answer("任务成员使用状况暂时不可用。")
             return
-        if not users:
-            if snapshot.scope_mode == ALLOWLIST:
-                await message.answer(f"任务 {html.escape(snapshot.name)} 白名单为空，请使用 /addtaskmember 添加成员。")
-            elif snapshot.scope_mode == EXCLUDE:
-                await message.answer(f"任务 {html.escape(snapshot.name)} 范围内暂无本地用户。")
-            else:
-                await message.answer("任务范围内暂无本地用户。")
-            return
-        lines = [
+        header = (
             f"任务：{html.escape(snapshot.name)} | {'RUNNING' if snapshot.enabled else 'STOPPED'} | 范围：{snapshot.scope_mode} | "
             f"本地用户：{len(users)} 个 | 任务额度 ${snapshot.limit_usd:.2f}"
-        ]
+        )
+        if not users:
+            lines = [header, *_device_account_usage_lines(account_usage)]
+            if snapshot.scope_mode == ALLOWLIST:
+                lines.append(f"任务 {html.escape(snapshot.name)} 白名单为空，请使用 /addtaskmember 添加成员。")
+            elif snapshot.scope_mode == EXCLUDE:
+                lines.append(f"任务 {html.escape(snapshot.name)} 范围内暂无本地用户。")
+            else:
+                lines.append("任务范围内暂无本地用户。")
+            await _answer_lines(message, lines)
+            return
+        lines = [header, *_device_account_usage_lines(account_usage)]
         for user in users:
             status = await device_quota.status(user.id, task_id=snapshot.id)
             used = f"${status.used_usd:.2f}" if status.used_usd is not None else "待同步"
@@ -668,7 +717,13 @@ def build_admin_router(settings: Settings) -> Router:
         await _answer_lines(message, lines)
 
     @router.message(Command("starttask"))
-    async def start_task(message: Message, command: CommandObject, task: QuotaTaskService, recovery: RecoveryService, jobs: BackgroundJobs) -> None:
+    async def start_task(
+        message: Message,
+        command: CommandObject,
+        task: QuotaTaskService,
+        device_account_reconcile: DeviceAccountReconcileService,
+        jobs: BackgroundJobs,
+    ) -> None:
         if not is_admin(message):
             return
         try:
@@ -677,9 +732,9 @@ def build_admin_router(settings: Settings) -> Router:
             await message.answer(f"启动失败：{html.escape(str(exc))}")
             return
         try:
-            account = await recovery.validate_selected_account()
+            account = await device_account_reconcile.reconcile(name, operator_id=message.from_user.id)  # type: ignore[union-attr]
             await jobs.start_quota_task(name, message.from_user.id)  # type: ignore[union-attr]
-            reply = f"限额任务 {html.escape(name)} 已启动，写操作已开启（账号 {account.account_id}）。"
+            reply = f"限额任务 {html.escape(name)} 已启动，写操作已开启（账号 {html.escape(account.account_id)}）。"
             if not await task.sync_enabled():
                 reply += "\n注意：数据统计当前已停止，配额动作不会自动执行；恢复统计请使用 /startstats。"
             await message.answer(reply)
@@ -804,46 +859,17 @@ def build_admin_router(settings: Settings) -> Router:
         except (DomainError, ValueError) as exc:
             await message.answer(f"成员范围更新失败：{html.escape(str(exc))}")
 
-    @router.message(Command("account", "recovery_enable"))
-    async def recovery_enable(message: Message, command: CommandObject, recovery: RecoveryService) -> None:
+    @router.message(Command("recovery_enable"))
+    async def recovery_enable(message: Message, command: CommandObject, device_account_reconcile: DeviceAccountReconcileService) -> None:
         if not is_admin(message):
             return
-        if command.command.casefold() == "account":
-            try:
-                listing = await recovery.list_accounts()
-                selected = listing.selected_account_id
-                lines = [f"当前账号状态：{html.escape(listing.me.current_account.status)}"]
-                if selected:
-                    lines.append(f"已选择账号：{html.escape(selected)}")
-                else:
-                    lines.append("已选择账号：未选择")
-                if not listing.accounts.items:
-                    lines.append("实时账号：暂无")
-                else:
-                    lines.append("实时账号：")
-                    for account in listing.accounts.items:
-                        if not isinstance(account, AccountRecord):
-                            continue
-                        account_id = html.escape(str(account.account_id)) if account.account_id is not None else "无效"
-                        email = html.escape(account.account_email or "-")
-                        lifecycle = html.escape(account.lifecycle or "unknown")
-                        health = html.escape(account.health or "unknown")
-                        marker = " [当前]" if selected is not None and str(account.account_id).strip() == selected.strip() else ""
-                        lines.append(f"- {account_id}{marker} | {email} | lifecycle={lifecycle} | health={health}")
-                await message.answer("\n".join(lines))
-            except DomainError as exc:
-                await message.answer(f"账号查询失败：{exc}")
-            except Exception as exc:
-                log.error(
-                    "reclaude_account_listing_failed",
-                    error_type=type(exc).__name__,
-                    traceback="".join(traceback.format_tb(exc.__traceback__)),
-                )
-                await message.answer("账号查询失败，请检查 Reclaude 登录和会话状态。")
-            return
         try:
-            await recovery.health_sync_reconcile_enable(message.from_user.id)  # type: ignore[union-attr]
-            await message.answer("所选账号已通过登录与健康校验；任务保持 STOPPED，写闸未开启。需要启用配额时请使用 /starttask。")
+            await device_account_reconcile.reconcile(operator_id=message.from_user.id)  # type: ignore[union-attr]
+            # This explicit recovery command retains its historical contract:
+            # validate the live account, then leave every task stopped for a
+            # deliberate /starttask.
+            await device_account_reconcile.gate.force_stop("reclaude_recovery_validated_tasks_stopped")
+            await message.answer("Reclaude 账号已自动核对；任务保持 STOPPED，写闸未开启。需要启用配额时请使用 /starttask。")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
         except Exception:
@@ -882,6 +908,54 @@ def _format_datetime(value: object) -> str:
     if isinstance(value, datetime):
         return format_beijing(value)
     return value.isoformat() if hasattr(value, "isoformat") else "unknown"
+
+
+async def _account_inventory_lines(recovery: RecoveryService) -> list[str]:
+    listing = await recovery.list_accounts()
+    selected = listing.selected_account_id
+    lines = [f"当前账号状态：{html.escape(listing.me.current_account.status)}"]
+    lines.append(f"已选择账号：{html.escape(selected) if selected else '未选择'}")
+    if not listing.accounts.items:
+        lines.append("实时账号：暂无")
+        return lines
+    lines.append("实时账号：")
+    for account in listing.accounts.items:
+        account_id = html.escape(str(account.account_id)) if account.account_id is not None else "无效"
+        email = html.escape(account.account_email or "-")
+        lifecycle = html.escape(account.lifecycle or "unknown")
+        health = html.escape(account.health or "unknown")
+        marker = " [当前]" if selected is not None and str(account.account_id).strip() == selected.strip() else ""
+        lines.append(f"- {account_id}{marker} | {email} | lifecycle={lifecycle} | health={health}")
+    return lines
+
+
+def _device_account_usage_lines(
+    usage: DeviceAccountUsage | None,
+    *,
+    unavailable_reason: str | None = None,
+) -> list[str]:
+    if usage is None:
+        reason = unavailable_reason or "上游查询失败"
+        return [f"组织账号用量：暂时不可用（{html.escape(reason)}）"]
+    five_hour_reset = _format_datetime(usage.five_hour_resets_at) if usage.five_hour_resets_at is not None else "未激活"
+    managed_used = f"${usage.managed_used_usd:.2f}" if usage.managed_used_usd is not None else "—"
+    if usage.estimated_total_usd is not None:
+        estimate = f"≈${usage.estimated_total_usd:.2f}（按托管设备消费估算，仅供参考）"
+    else:
+        reason = html.escape(usage.estimate_reason or "数据不足")
+        estimate = f"—（{reason}）"
+    return [
+        f"组织账号：{html.escape(usage.email_masked)} | 状态：{html.escape(usage.account_status or '未知')} "
+        f"（快照 {_format_datetime(usage.usage_updated_at)}）",
+        f"组织账号 5h 限额：已用 {_format_percent(usage.five_hour_utilization)} | 重置：{five_hour_reset}",
+        f"组织账号 7天限额：已用 {_format_percent(usage.seven_day_utilization)} | 重置：{_format_datetime(usage.seven_day_resets_at)}",
+        f"本周期托管设备已用：{managed_used}",
+        f"预估总额度：{estimate}",
+    ]
+
+
+def _format_percent(value: Decimal | None) -> str:
+    return f"{value:.1f}%" if value is not None else "未知"
 
 
 async def _record_username_safely_from_store(

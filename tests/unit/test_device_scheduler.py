@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from reclaude_bot.domain.errors import AuthenticationCircuitOpen
+from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError
 from reclaude_bot.jobs.scheduler import BackgroundJobs
 
 
@@ -56,6 +56,30 @@ async def test_disabled_statistics_do_not_run_device_tick():
     jobs, task, cycle, sampling, actions = setup_jobs()
     task.sync_enabled.return_value = False
     assert await jobs.run_tick() == 0
+    cycle.sync.assert_not_called()
+    sampling.tick.assert_not_called()
+    actions.run_once.assert_not_called()
+
+
+async def test_account_reconcile_precedes_cycle_sampling_and_actions():
+    jobs, _, cycle, sampling, actions = setup_jobs()
+    calls = []
+    jobs.device_account_reconcile = SimpleNamespace(
+        is_configured=AsyncMock(return_value=True), reconcile=AsyncMock(side_effect=lambda: calls.append("account")),
+    )
+    cycle.sync.side_effect = lambda: calls.append("cycle")
+    sampling.tick.side_effect = lambda: calls.append("sampling") or ()
+    actions.run_once.side_effect = lambda **kwargs: calls.append("actions") or 0
+    await jobs.run_tick()
+    assert calls == ["account", "cycle", "sampling", "actions"]
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("account lookup failed"), EligibilityError("reset pending")])
+async def test_failed_account_reconcile_never_samples_or_enforces_old_account(failure):
+    jobs, _, cycle, sampling, actions = setup_jobs()
+    jobs.device_account_reconcile = SimpleNamespace(is_configured=AsyncMock(return_value=True), reconcile=AsyncMock(side_effect=failure))
+    with pytest.raises(type(failure)):
+        await jobs.run_tick()
     cycle.sync.assert_not_called()
     sampling.tick.assert_not_called()
     actions.run_once.assert_not_called()
@@ -127,3 +151,27 @@ async def test_loop_waits_full_interval_and_remains_stoppable(monkeypatch, devic
     await jobs._loop()
     tick.assert_awaited_once()
     assert intervals == [expected_interval]
+
+
+@pytest.mark.parametrize("reset_fails", [False, True])
+async def test_account_notices_deliver_even_when_reset_fails_or_task_is_stopped(reset_fails):
+    jobs, task, _, _, _ = setup_jobs()
+    await jobs.stop_quota_task("default", 999)
+    jobs.device_account_notifications = SimpleNamespace(deliver_pending=AsyncMock(return_value=1))
+    jobs.device_account_reconcile = SimpleNamespace(
+        is_configured=AsyncMock(return_value=True),
+        reconcile=AsyncMock(side_effect=EligibilityError("baseline unavailable") if reset_fails else None),
+    )
+    if reset_fails:
+        with pytest.raises(EligibilityError):
+            await jobs.run_tick()
+    else:
+        await jobs.run_tick()
+    jobs.device_account_notifications.deliver_pending.assert_awaited_once()
+
+
+async def test_notification_transport_failure_does_not_fail_successful_statistics():
+    jobs, _, _, _, _ = setup_jobs()
+    jobs.device_account_notifications = SimpleNamespace(deliver_pending=AsyncMock(side_effect=RuntimeError("notice transport unavailable")))
+    assert await jobs.run_tick() == 3
+    assert jobs.status()["last_tick_error"] is None

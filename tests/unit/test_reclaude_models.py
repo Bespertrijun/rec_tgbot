@@ -79,42 +79,42 @@ def test_accounts_use_account_id_and_keep_record_id_distinct() -> None:
         AccountsResponse.model_validate({"items": [{"account_id": True, "health": "healthy", "lifecycle": "bound"}]})
 
 
-def test_admin_recovery_commands_share_account_handler() -> None:
+def test_recovery_command_is_separate_from_private_account_alias() -> None:
     router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
     matching = [handler for handler in router.message.handlers if handler.callback.__name__ == "recovery_enable"]
     assert len(matching) == 1
     filters = matching[0].filters
     assert filters is not None
-    assert getattr(filters[0].callback, "commands", None) == ("account", "recovery_enable")
+    assert getattr(filters[0].callback, "commands", None) == ("recovery_enable",)
 
 
 @pytest.mark.asyncio
-async def test_use_account_escapes_domain_error_for_html_mode() -> None:
+async def test_account_listing_escapes_domain_error_for_html_mode() -> None:
     router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
-    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "use_account")
-    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
-    command = type("Command", (), {"args": "4949"})()
-    recovery = SimpleNamespace(select_account=AsyncMock(side_effect=EligibilityError("invalid <account> & status")))
+    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "task_status")
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type="private"), answer=AsyncMock())
+    command = SimpleNamespace(args=None)
+    recovery = SimpleNamespace(list_accounts=AsyncMock(side_effect=EligibilityError("invalid <account> & status")))
+    task = SimpleNamespace(list_tasks=AsyncMock(return_value=[]))
 
-    await handler(message, command, recovery)
+    await handler(message, command, task, SimpleNamespace(), SimpleNamespace(), recovery)
 
-    message.answer.assert_awaited_once_with("账号选择失败：invalid &lt;account&gt; &amp; status")
+    assert "账号查询失败：invalid &lt;account&gt; &amp; status" in message.answer.await_args.args[0]
 
 
 @pytest.mark.asyncio
 async def test_account_unexpected_error_logs_safe_structured_event() -> None:
     router = build_admin_router(Settings(DATABASE_URL="postgresql+asyncpg://test:test@localhost/test", TELEGRAM_ADMIN_IDS=[1]))
-    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "recovery_enable")
+    handler = next(handler.callback for handler in router.message.handlers if handler.callback.__name__ == "task_status")
     secret_marker = "session-cookie-secret-marker"
-    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type="private"), answer=AsyncMock())
     command = type("Command", (), {"command": "account", "args": None})()
     recovery = SimpleNamespace(list_accounts=AsyncMock(side_effect=RuntimeError(secret_marker)))
 
     with capture_logs() as logs:
-        await handler(message, command, recovery)
+        await handler(message, command, SimpleNamespace(list_tasks=AsyncMock(return_value=[])), SimpleNamespace(), SimpleNamespace(), recovery)
 
     event = next(item for item in logs if item.get("event") == "reclaude_account_listing_failed")
     assert event.get("error_type") == "RuntimeError"
-    assert event.get("traceback")
     assert secret_marker not in repr(logs)
-    message.answer.assert_awaited_once_with("账号查询失败，请检查 Reclaude 登录和会话状态。")
+    assert "账号查询失败，请检查 Reclaude 登录和会话状态。" in message.answer.await_args.args[0]

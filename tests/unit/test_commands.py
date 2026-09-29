@@ -26,7 +26,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
     assert isinstance(calls[0].kwargs["scope"], BotCommandScopeDefault)
     public = {"start", "bind", "status", "auth", "deauth", "send"}
     admin = {"sync", "member", "setquota", "ban", "unban", "unbind", "device", "authuser", "deauthuser", "audit", "groups",
-             "account", "use", "newtask", "deltatask", "task", "starttask", "stoptask", "startstats", "stopstats", "addtaskmember",
+             "newtask", "deltatask", "task", "starttask", "stoptask", "startstats", "stopstats", "addtaskmember",
              "deletetaskmember", "settaskquota", "taskusers", "update", "recovery_enable", "reset"}
     assert {entry["command"] for entry in _commands(calls[0])} == public
     for call, admin_id in zip(calls[1:], [101, 202], strict=True):

@@ -294,7 +294,7 @@ class QuotaTaskService:
                 task = await self._get_task(session, resolved, with_for_update=True)
                 state = await self._ensure_state(session, with_for_update=True)
                 if state.selected_account_id is None:
-                    raise EligibilityError("尚未选择 Reclaude 账号，请先使用 /use account_id")
+                    raise EligibilityError("尚未确认 Reclaude 绑定账号，请先完成账号同步")
                 now = utcnow()
                 changed = task.status != TaskStatus.RUNNING.value
                 task.status = TaskStatus.RUNNING.value
@@ -346,6 +346,8 @@ class QuotaTaskService:
                 if not await self._any_running(session):
                     return False
                 state = await self._ensure_state(session, with_for_update=True)
+                if state.reason.startswith("account_reconcile_") and state.reason != "account_reconciled":
+                    return False
                 state.write_enabled = True
                 state.reason = reason
                 state.updated_at = utcnow()
@@ -566,6 +568,10 @@ class QuotaTaskService:
 
         state = await self._ensure_state(session, with_for_update=True)
         if await self._any_running(session):
+            if state.reason.startswith("account_reconcile_") and state.reason != "account_reconciled":
+                state.write_enabled = False
+                state.updated_at = now
+                return
             if not state.write_enabled:
                 state.write_enabled = True
                 state.reason = "quota_task_started"

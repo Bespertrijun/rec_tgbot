@@ -33,8 +33,6 @@ _ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("deauthuser", "按邮箱撤销用户设备"),
     ("audit", "查看审计记录"),
     ("groups", "查看托管群组"),
-    ("account", "查看 Reclaude 实时账号"),
-    ("use", "选择或校验 Reclaude 账号"),
     ("newtask", "新建限额任务"),
     ("deltatask", "删除限额任务"),
     ("task", "查看限额任务状态"),

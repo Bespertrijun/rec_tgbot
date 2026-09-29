@@ -15,7 +15,7 @@ from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import as_decimal
 from reclaude_bot.infrastructure.db.models import DeviceTaskScope, QuotaTask
 from reclaude_bot.infrastructure.reclaude.client import ReclaudeGateway
-from reclaude_bot.infrastructure.reclaude.models import MeResponse
+from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse, MeResponse
 
 
 @dataclass(frozen=True)
@@ -45,16 +45,65 @@ class SingleOrgAccountSource:
         if requested_org_id != self.org_id:
             raise EligibilityError("当前仅支持已配置的 Reclaude 组织")
 
-        account_id = self.gateway.account_id
+        # The cached gateway ID is only a write-routing hint.  Discover the
+        # current account from the live organization inventory instead, and
+        # bracket /me so a concurrent account replacement cannot be mixed into
+        # one usage snapshot.
+        before = await self.gateway.accounts()
+        before_id = self._bound_account_id(before)
         me = await self.gateway.me()
-        if self.gateway.account_id != account_id:
+        after = await self.gateway.accounts()
+        after_id = self._bound_account_id(after)
+        if after_id != before_id:
             raise EligibilityError("查询期间 Reclaude 账号已切换，不能确认用量所属账号")
+        if not isinstance(me, MeResponse):
+            raise EligibilityError("Reclaude 用量响应无效")
+        if me.current_account.status.strip().casefold() != "bound":
+            raise EligibilityError("Reclaude 当前账号未绑定")
 
         return OrgAccountUsage(
             org_id=requested_org_id,
-            account_id=None if account_id is None else str(account_id),
+            account_id=before_id,
             me=me,
         )
+
+    def _bound_account_id(self, accounts: AccountsResponse) -> str:
+        if not isinstance(accounts, AccountsResponse):
+            raise EligibilityError("Reclaude 账号响应无效")
+        bound = [record for record in accounts.items if self._is_bound(record)]
+        if len(bound) != 1:
+            raise EligibilityError("Reclaude 组织必须恰好有一个已绑定账号")
+        record = bound[0]
+        account_id = self._validated_account_id(record.account_id)
+        if record.org_id not in (None, ""):
+            raw_org_id = record.org_id.strip() if isinstance(record.org_id, str) else record.org_id
+            if isinstance(raw_org_id, bool) or not isinstance(raw_org_id, (int, str)):
+                raise EligibilityError("Reclaude 账号组织不匹配")
+            if isinstance(raw_org_id, str) and (not raw_org_id.isdigit() or int(raw_org_id) <= 0):
+                raise EligibilityError("Reclaude 账号组织不匹配")
+            if int(raw_org_id) != self.org_id:
+                raise EligibilityError("Reclaude 账号组织不匹配")
+        if not record.has_usable_health():
+            raise EligibilityError("Reclaude 当前账号健康状态不可用")
+        return str(account_id)
+
+    def _is_bound(self, record: AccountRecord) -> bool:
+        if not isinstance(record, AccountRecord):
+            raise EligibilityError("Reclaude 账号响应无效")
+        return (record.lifecycle or "").strip().casefold() == "bound"
+
+    @staticmethod
+    def _validated_account_id(account_id: int | str | None) -> int | str:
+        if isinstance(account_id, bool) or account_id is None:
+            raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")
+        if isinstance(account_id, int):
+            if account_id <= 0:
+                raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")
+            return account_id
+        normalized = account_id.strip()
+        if len(normalized) <= 128 and normalized.isdigit() and int(normalized) > 0:
+            return normalized
+        raise EligibilityError("Reclaude 已绑定账号缺少有效 account_id")
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,8 @@ from uuid import uuid4
 import structlog
 
 from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActionService
+from reclaude_bot.application.device_account_notifications import DeviceAccountNotificationService
+from reclaude_bot.application.device_account_reconcile import DeviceAccountReconcileService
 from reclaude_bot.application.device_cycle import DeviceCycleService
 from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.quota import QuotaService
@@ -29,6 +31,8 @@ class BackgroundJobs:
         device_cycle: DeviceCycleService | None = None,
         device_sampling: DeviceSamplingService | None = None,
         device_actions: DeviceQuotaActionService | None = None,
+        device_account_reconcile: DeviceAccountReconcileService | None = None,
+        device_account_notifications: DeviceAccountNotificationService | None = None,
     ) -> None:
         device_services = (device_cycle, device_sampling, device_actions)
         if any(service is not None for service in device_services) and not all(
@@ -40,6 +44,8 @@ class BackgroundJobs:
         self.device_cycle = device_cycle
         self.device_sampling = device_sampling
         self.device_actions = device_actions
+        self.device_account_reconcile = device_account_reconcile
+        self.device_account_notifications = device_account_notifications
         self.onboarding = onboarding
         self.task_service = task_service
         self.gate = getattr(actions, "gate", None)
@@ -82,6 +88,8 @@ class BackgroundJobs:
         """
 
         if self.task_service is not None and persist:
+            if self.device_account_reconcile is not None and await self.device_account_reconcile.is_configured(name):
+                await self.device_account_reconcile.reconcile(name, operator_id=operator_id)
             changed = await self.task_service.start(name, operator_id)
         else:
             changed = self._task is None or self._task.done()
@@ -98,6 +106,13 @@ class BackgroundJobs:
         if self.task_service is not None:
             if not await self.task_service.sync_enabled():
                 return False
+            if self.device_account_reconcile is not None and await self.device_account_reconcile.is_configured():
+                try:
+                    await self.device_account_reconcile.reconcile()
+                except Exception as exc:
+                    # Keep the loop available for a retry; enable_latch below
+                    # is guarded by the durable reconcile failure reason.
+                    log.warning("device_account_reconcile_startup_failed", error_type=type(exc).__name__)
             # Re-opens the write latch only while a task is RUNNING; the loop starts regardless.
             await self.task_service.enable_latch()
         elif self.gate is not None:
@@ -185,6 +200,11 @@ class BackgroundJobs:
             if self.device_cycle is None or self.device_sampling is None or self.device_actions is None:
                 result = await poll_once(self.quota, self.actions, now=now)
             else:
+                if self.device_account_reconcile is not None and await self.device_account_reconcile.is_configured():
+                    # Account replacement is a safety boundary.  Let the
+                    # exception escape before sampling or quota actions can
+                    # continue against stale cycle evidence.
+                    await self.device_account_reconcile.reconcile()
                 try:
                     await self.device_cycle.sync()
                 except AuthenticationCircuitOpen:
@@ -214,6 +234,12 @@ class BackgroundJobs:
             self.last_tick_error = str(exc)
             log.exception("quota_task_tick_failed", job_run_id=job_run_id, error=str(exc))
             raise
+        finally:
+            if self.device_account_notifications is not None:
+                try:
+                    await self.device_account_notifications.deliver_pending(now=now)
+                except Exception as exc:
+                    log.warning("device_account_notification_delivery_failed", error_type=type(exc).__name__)
         self.last_tick_finished = datetime.now(UTC)
         self.last_tick_error = None
         self.last_result_count = result

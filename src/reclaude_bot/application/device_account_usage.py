@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
 from reclaude_bot.application.audit import utcnow
 from reclaude_bot.application.device_context import OrgAccountSource, OrgAccountUsage
 from reclaude_bot.domain.errors import EligibilityError
@@ -95,6 +96,7 @@ class DeviceAccountUsageService:
         *,
         clock: Callable[[], datetime] = utcnow,
         max_snapshot_age_seconds: int | float | None = None,
+        refresh: AccountUsageRefreshService | None = None,
     ) -> None:
         if isinstance(org_id, bool) or not isinstance(org_id, int) or org_id <= 0:
             raise EligibilityError("组织 ID 必须是正整数")
@@ -105,6 +107,7 @@ class DeviceAccountUsageService:
         self.source = source
         self.org_id = org_id
         self.clock = clock
+        self.refresh = refresh
 
     async def get_account_usage(
         self,
@@ -116,6 +119,8 @@ class DeviceAccountUsageService:
         request_started_at = self._now(now)
         before = await self._current_cycle(task_id, request_started_at)
 
+        if self.refresh is not None:
+            await self.refresh.refresh_if_due(now=request_started_at)
         usage = await self.source.get_usage(self.org_id)
         response_received_at = self._now()
         source = self._source_fact(usage, response_received_at)

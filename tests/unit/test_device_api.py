@@ -74,6 +74,36 @@ async def test_describe_uses_fixed_endpoint_and_ms_times_without_logging_state()
     assert STATE not in repr(logs)
 
 
+async def test_account_usage_refresh_uses_rec_ui_endpoint_and_org_without_body():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with client_for(handler, org_id=178) as client:
+        await client.refresh_account_usage()
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/api/app/account/usage/refresh"
+    assert dict(requests[0].url.params) == {"org_id": "178"}
+    assert requests[0].content == b""
+
+
+@pytest.mark.parametrize("status", [401, 429, 500])
+async def test_account_usage_refresh_failure_is_not_retried(status):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": "unavailable"})
+
+    async with client_for(handler, org_id=178) as client:
+        with pytest.raises(UpstreamError):
+            await client.refresh_account_usage()
+    assert len(requests) == 1
+
+
 async def test_describe_preserves_observed_client_metadata():
     async with client_for(lambda _: httpx.Response(200, json=DESCRIPTION)) as client:
         result = await client.describe_device_auth(STATE)

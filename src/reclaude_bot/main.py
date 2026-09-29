@@ -6,6 +6,7 @@ from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
 from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActionService
 from reclaude_bot.application.admin import AdminService
 from reclaude_bot.application.binding import BindingService
@@ -104,6 +105,7 @@ async def run() -> None:
         session_factory,
         device_account_source,
         settings.reclaude_org_id,
+        refresh=AccountUsageRefreshService(session_factory, gateway),
     )
     device_collector = DeviceUsageCollector(session_factory, gateway, settings.reclaude_org_id)
     device_ledger = DeviceLedgerService(session_factory, settings.reclaude_org_id)

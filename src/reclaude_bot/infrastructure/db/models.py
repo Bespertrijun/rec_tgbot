@@ -184,6 +184,7 @@ class ServiceState(Base):
     sync_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     reason: Mapped[str] = mapped_column(String(128), default="startup_recovery_required", nullable=False)
     selected_account_id: Mapped[str | None] = mapped_column(String(128))
+    account_usage_refresh_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

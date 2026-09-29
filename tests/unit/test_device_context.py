@@ -24,6 +24,7 @@ def gateway():
     return SimpleNamespace(
         account_id=4949, org_id=178, me=AsyncMock(return_value=me), authenticate=AsyncMock(),
         members=AsyncMock(), assign=AsyncMock(), revoke=AsyncMock(),
+        refresh_account_usage=AsyncMock(),
         accounts=AsyncMock(return_value=accounts(8123)),
     )
 
@@ -74,6 +75,11 @@ async def test_switch_during_read_cannot_misattribute_account(gateway):
         await SingleOrgAccountSource(gateway, 178).get_usage(178)
     gateway.me.assert_awaited_once()
     assert gateway.account_id == 4949
+
+
+async def test_reading_account_usage_never_triggers_refresh(gateway):
+    await SingleOrgAccountSource(gateway, 178).get_usage(178)
+    gateway.refresh_account_usage.assert_not_awaited()
 
 
 async def test_auth_circuit_error_is_not_hidden_or_retried(gateway):

@@ -25,6 +25,7 @@ class FakeReclaudeGateway:
         self.revoke_calls: list[str] = []
         self.members_calls = 0
         self.me_calls = 0
+        self.refresh_account_usage_calls = 0
         self.accounts_calls = 0
         if account_id is not None:
             self.configure_account_id(account_id)
@@ -36,6 +37,9 @@ class FakeReclaudeGateway:
     async def me(self) -> MeResponse:
         self.me_calls += 1
         return self.me_response
+
+    async def refresh_account_usage(self) -> None:
+        self.refresh_account_usage_calls += 1
 
     async def authenticate(self) -> MeResponse:
         return await self.me()

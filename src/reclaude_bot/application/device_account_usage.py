@@ -310,7 +310,7 @@ class DeviceAccountUsageService:
             source_reason = "账号周期已刷新"
         elif not same_cycle_reset(weekly_reset, seven_day_reset):
             source_reason = "账号 7天窗口与周期不一致"
-        elif account.status.strip().casefold() != "bound" or weekly.is_active is not True or account_id is None:
+        elif account.status.strip().casefold() != "bound" or account_id is None:
             source_reason = "账号来源未核实"
         elif weekly_percent is None or seven_percent is None:
             source_reason = "7天使用率无效"

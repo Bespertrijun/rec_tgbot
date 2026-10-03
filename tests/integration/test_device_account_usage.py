@@ -48,10 +48,13 @@ async def seeded(factory, *, total="120"):
     return cycle_id, association_id, ledger_id
 
 
-async def test_estimate_uses_confirmed_spend_and_is_read_only(lifecycle_db):
+@pytest.mark.parametrize("is_active", [False, True])
+async def test_estimate_uses_confirmed_spend_and_is_read_only(lifecycle_db, is_active):
     factory, _ = lifecycle_db
     await seeded(factory)
-    app, source = service(factory)
+    usage = source_usage()
+    usage.me.weekly_all().is_active = is_active
+    app, source = service(factory, usage)
     statements = []
     engine = factory.kw["bind"].sync_engine
 

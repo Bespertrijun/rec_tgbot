@@ -73,13 +73,11 @@ async def test_last_day_boundary_and_weekly_capacity(lifecycle_db, until_reset, 
     assert result.status == "VERIFIED" and result.last_day_allow is allowed
 
 
-@pytest.mark.parametrize("case", ["inactive", "unbound", "future", "unselected"])
+@pytest.mark.parametrize("case", ["unbound", "future", "unselected"])
 async def test_invalid_account_evidence_cannot_grant_last_day_permission(lifecycle_db, case):
     factory, _ = lifecycle_db
     kwargs = {"reset": NOW + timedelta(hours=12)}
-    if case == "inactive":
-        kwargs["is_active"] = False
-    elif case == "unbound":
+    if case == "unbound":
         kwargs["status"] = "unbound"
     elif case == "future":
         kwargs["sampled_at"] = NOW + timedelta(seconds=1)
@@ -317,4 +315,18 @@ async def test_small_successive_drifts_do_not_move_the_cycle_anchor(lifecycle_db
         result = await service.sync()
         assert result.id == original.id and result.reset_at == RESET
         assert result.status == expected
+    assert len(await cycles(factory)) == 1
+
+
+async def test_inactive_weekly_window_recovers_existing_review_cycle(lifecycle_db):
+    factory, _ = lifecycle_db
+    service, _, clock = cycle_fixture(factory, snapshot(percent="0", is_active=False))
+    cycle = await service.sync()
+    assert cycle.status == "VERIFIED"
+    async with factory.begin() as session:
+        (await session.get(DeviceQuotaCycle, cycle.id)).status = "NEEDS_REVIEW"
+    clock[0] += timedelta(minutes=5)
+    recovered = await service.sync()
+    assert recovered.id == cycle.id
+    assert recovered.status == "VERIFIED"
     assert len(await cycles(factory)) == 1

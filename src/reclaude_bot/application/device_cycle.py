@@ -231,7 +231,6 @@ class DeviceCycleService:
         source_valid = (
             usage.account_id is not None
             and usage.me.current_account.status.strip().casefold() == "bound"
-            and weekly.is_active is True
             and age >= timedelta(0)
         )
         return _CycleEvidence(

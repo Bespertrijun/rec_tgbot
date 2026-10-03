@@ -72,13 +72,15 @@ async def database_state(factory):
 
 
 @pytest.mark.parametrize("running", [False, True])
-async def test_reset_preserves_history_binding_task_and_gate_but_clears_new_usage_and_adjustments(lifecycle_db, running):
+@pytest.mark.parametrize("is_active", [False, True])
+async def test_reset_preserves_history_binding_task_and_gate_but_clears_new_usage_and_adjustments(lifecycle_db, running, is_active):
     factory, _ = lifecycle_db
     old_id = await ready_cycle(factory, running=running)
     association_id, ledger_id = await metered_user(factory, old_id, "800", locked=True)
     old_quota = DeviceQuotaService(factory, 178, clock=lambda: NOW)
     await old_quota.adjust(1, old_id, Decimal("50"), "old adjustment", 999, operation_key="old-adjust")
     rt = runtime(factory)
+    rt.gateway.me.return_value.weekly_all().is_active = is_active
     result = await reset_task(rt)
     assert result.cycle_id != old_id
     status = await rt.quota.status(1, task_id=1)
@@ -158,7 +160,7 @@ async def test_account_fetch_failure_leaves_task_unchanged(lifecycle_db):
     rt.gateway.device_usage.assert_not_called()
 
 
-@pytest.mark.parametrize("case", ["unbound", "inactive", "account_changed", "expired"])
+@pytest.mark.parametrize("case", ["unbound", "account_changed", "expired"])
 async def test_invalid_account_or_cycle_does_not_reset(lifecycle_db, case):
     factory, _ = lifecycle_db
     await ready_cycle(factory)
@@ -169,8 +171,6 @@ async def test_invalid_account_or_cycle_does_not_reset(lifecycle_db, case):
         kwargs: dict[str, Any] = {"sampled_at": RESET_MOMENT}
         if case == "unbound":
             kwargs["status"] = "unbound"
-        elif case == "inactive":
-            kwargs["is_active"] = False
         else:
             kwargs["reset"] = RESET_MOMENT
         rt.gateway.me.return_value = account_snapshot(**kwargs).me

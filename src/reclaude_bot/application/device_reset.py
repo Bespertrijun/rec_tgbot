@@ -14,6 +14,7 @@ from reclaude_bot.application.device_account_notifications import DeviceAccountN
 from reclaude_bot.application.device_context import SingleOrgTaskService
 from reclaude_bot.application.device_cycle import DeviceCycleEvidence, DeviceCycleService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
+from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import (
@@ -48,6 +49,9 @@ class DeviceTaskResetResult:
     reset_at: datetime
     device_count: int
     user_count: int
+    opening_limit_usd: Decimal | None = None
+    quota_source_estimate_usd: Decimal | None = None
+    quota_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,10 @@ class DeviceTaskResetService:
                     ),
                     last_day_checked_at=ensure_utc(evidence.request_started_at),
                 )
+                task = await session.get(QuotaTask, plan.task_id)
+                if task is None:
+                    raise EligibilityError("额度任务不存在")
+                apply_round_quota(task, latest, cycle, now)
                 session.add(cycle)
                 await session.flush()
 
@@ -288,7 +296,7 @@ class DeviceTaskResetService:
                         task_name=plan.task_name,
                         account_id=target_account_id,
                         previous_account_id=plan.selected_account_id,
-                        task_limit_usd=plan.task_limit_usd,
+                        task_limit_usd=Decimal(task.limit_usd),
                         reset_at=cycle.reset_at,
                         affected_user_ids=affected_user_ids,
                     )
@@ -320,6 +328,7 @@ class DeviceTaskResetService:
                         "account_id": target_account_id,
                         "device_count": len(current.associations),
                         "user_count": len(current.covered_user_ids),
+                        **round_quota_summary(cycle),
                     },
                 )
                 return DeviceTaskResetResult(
@@ -328,6 +337,9 @@ class DeviceTaskResetService:
                     reset_at=ensure_utc(evidence.reset_at),
                     device_count=len(current.associations),
                     user_count=len(current.covered_user_ids),
+                    opening_limit_usd=cycle.opening_limit_usd,
+                    quota_source_estimate_usd=cycle.quota_source_estimate_usd,
+                    quota_reason=cycle.quota_reason,
                 )
 
     async def _read_plan(
@@ -501,6 +513,9 @@ class DeviceTaskResetService:
                     reset_at=ensure_utc(datetime.fromisoformat(str(summary["reset_at"]))),
                     device_count=int(summary["device_count"]),
                     user_count=int(summary["user_count"]),
+                    opening_limit_usd=Decimal(str(summary["opening_limit_usd"])) if summary.get("opening_limit_usd") is not None else None,
+                    quota_source_estimate_usd=Decimal(str(summary["quota_source_estimate_usd"])) if summary.get("quota_source_estimate_usd") is not None else None,
+                    quota_reason=str(summary["quota_reason"]) if summary.get("quota_reason") is not None else None,
                 )
             except (KeyError, TypeError, ValueError):
                 raise EligibilityError("已有重置操作记录不完整，不能安全重试") from None

@@ -106,6 +106,7 @@ async def test_main_injects_device_services_fresh_query_and_write_gate_without_l
     assert auth.before_authorize.__self__.account_notifications is notices
     assert notices.user_notify_callback is not None
     assert jobs_created[0].device_cycle is auth.before_authorize.__self__.cycle_service
+    assert jobs_created[0].device_account_usage is dispatchers[0]["device_account_usage"]
     assert jobs_created[0].device_actions is actions
     assert jobs_created[0].device_sampling is not None
     await jobs_created[0].device_cycle.sync()

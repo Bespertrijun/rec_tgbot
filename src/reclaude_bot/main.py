@@ -183,6 +183,7 @@ async def run() -> None:
         onboarding_worker,
         task_service=task,
         device_cycle=device_cycle,
+        device_account_usage=device_account_usage,
         device_sampling=device_sampling,
         device_actions=device_quota_actions,
         device_account_reconcile=device_account_reconcile,

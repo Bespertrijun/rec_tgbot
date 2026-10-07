@@ -61,6 +61,7 @@ class _CycleIdentity:
     reset_at: datetime
     status: str
     account_id: str | None
+    estimate_blocked: bool
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,8 @@ class DeviceAccountUsageService:
             reason = "无有效设备周期"
         elif local.cycle.status != "VERIFIED":
             reason = "账号周期未核实"
+        elif local.cycle.estimate_blocked:
+            reason = "检测到账号用量重置或变化，等待 /reset 建立新轮"
         elif source.source_reason is not None:
             reason = source.source_reason
         elif local.selected_account_id is None or source.account_id != local.selected_account_id:
@@ -141,6 +144,8 @@ class DeviceAccountUsageService:
             reason = "账号或周期变化"
         elif not same_cycle_reset(source.weekly_reset_at, local.cycle.reset_at):
             reason = "账号或周期变化"
+        elif source.usage_updated_at < local.cycle.started_at:
+            reason = "账号快照早于本轮开始"
         elif local.managed_used_usd is None:
             reason = "无可用消费金额"
         elif local.managed_used_usd <= _ZERO:
@@ -173,6 +178,47 @@ class DeviceAccountUsageService:
 
     async def get(self, task_id: int, *, now: datetime | None = None) -> DeviceAccountUsage:
         return await self.get_account_usage(task_id, now=now)
+
+    async def record_estimate(self, task_id: int, *, expected_cycle_id: int) -> bool:
+        """Persist a validated estimate after sampling, without changing read APIs."""
+        usage = await self.get_account_usage(task_id)
+        moment = self._now()
+        async with self.session_factory() as session:
+            async with session.begin():
+                selected = self._normalize_account_id(await self._read_selected_account(session, lock=True))
+                scope = await session.scalar(select(DeviceTaskScope).where(
+                    DeviceTaskScope.task_id == task_id, DeviceTaskScope.org_id == self.org_id,
+                ).with_for_update())
+                if scope is None:
+                    return False
+                cycle = await self._current_cycle_row(session, task_id, moment, lock=True)
+                if (cycle is None or cycle.id != expected_cycle_id or cycle.id != usage.cycle_id
+                        or cycle.status != "VERIFIED" or cycle.estimate_blocked
+                        or cycle.account_id != usage.account_id
+                        or selected != usage.account_id
+                        or usage.cycle_started_at != ensure_utc(cycle.started_at)
+                        or usage.cycle_reset_at != ensure_utc(cycle.reset_at)):
+                    return False
+                sampled_at = ensure_utc(usage.usage_updated_at)
+                if (sampled_at < ensure_utc(cycle.started_at) or sampled_at > moment
+                        or (cycle.estimate_snapshot_at is not None and sampled_at <= ensure_utc(cycle.estimate_snapshot_at))):
+                    return False
+                percent = usage.seven_day_utilization
+                if percent is not None and any(
+                    previous is not None and percent < previous
+                    for previous in (cycle.weekly_percent, cycle.estimate_percent)
+                ):
+                    cycle.estimate_blocked = True
+                    return False
+                estimate = self._valid_money(usage.estimated_total_usd)
+                if usage.estimate_reason is not None or estimate is None or estimate <= _ZERO:
+                    return False
+                cycle.estimated_total_usd = estimate
+                cycle.estimate_used_usd = usage.managed_used_usd
+                cycle.estimate_percent = percent
+                cycle.estimate_snapshot_at = sampled_at
+                cycle.estimate_recorded_at = moment
+                return True
 
     async def _current_cycle(self, task_id: int, moment: datetime) -> _CycleIdentity | None:
         async with self.session_factory() as session:
@@ -340,11 +386,13 @@ class DeviceAccountUsageService:
             reset_at=ensure_utc(cycle.reset_at),
             status=cycle.status,
             account_id=DeviceAccountUsageService._account_id(cycle.account_id),
+            estimate_blocked=bool(cycle.estimate_blocked),
         )
 
     @staticmethod
-    async def _read_selected_account(session: AsyncSession) -> str | None:
-        return await session.scalar(select(ServiceState.selected_account_id).where(ServiceState.id == 1))
+    async def _read_selected_account(session: AsyncSession, *, lock: bool = False) -> str | None:
+        statement = select(ServiceState.selected_account_id).where(ServiceState.id == 1)
+        return await session.scalar(statement.with_for_update() if lock else statement)
 
     @staticmethod
     async def _current_cycle_row(

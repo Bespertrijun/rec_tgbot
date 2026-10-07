@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.device_context import DeviceTaskContext, OrgAccountSource, OrgAccountUsage, SingleOrgTaskService
+from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
 from reclaude_bot.domain.enums import CycleStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import as_decimal, ensure_utc, is_last_24h, same_cycle_reset
@@ -78,8 +79,8 @@ class DeviceCycleService:
         try:
             async with self.session_factory() as session:
                 async with session.begin():
+                    task = await session.get(QuotaTask, context.task_id, with_for_update=True)
                     scope = await self._locked_scope(session, context)
-                    task = await session.get(QuotaTask, context.task_id)
                     if task is None or scope.task_id != task.id:
                         raise EligibilityError("设备限额任务配置已变化")
 
@@ -99,12 +100,15 @@ class DeviceCycleService:
                         and same_cycle_reset(evidence.reset_at, latest.reset_at)
                     ):
                         if latest.account_id != evidence.account_id:
+                            latest.estimate_blocked = True
                             latest.status = CycleStatus.NEEDS_REVIEW.value
                             latest.last_day_allow = False
                             latest.last_day_checked_at = request_started_at
                             await self._write_audit(session, context, latest, "DEVICE_CYCLE_SOURCE_MISMATCH")
                             return latest
 
+                        if latest.weekly_percent is not None and evidence.percent < latest.weekly_percent:
+                            latest.estimate_blocked = True
                         latest.weekly_percent = evidence.percent
                         latest.status = self._cycle_status(evidence)
                         latest.last_day_allow = self._last_day_allow(evidence, received_at)
@@ -113,6 +117,7 @@ class DeviceCycleService:
                         return latest
 
                     if latest is not None and ensure_utc(latest.reset_at) > received_at:
+                        latest.estimate_blocked = True
                         latest.status = CycleStatus.NEEDS_REVIEW.value
                         latest.last_day_allow = False
                         latest.weekly_percent = None
@@ -151,6 +156,7 @@ class DeviceCycleService:
                         last_day_allow=self._last_day_allow(evidence, received_at),
                         last_day_checked_at=request_started_at,
                     )
+                    apply_round_quota(task, latest, cycle, received_at)
                     session.add(cycle)
                     await session.flush()
                     await self._write_audit(session, context, cycle, "DEVICE_CYCLE_SYNCED")
@@ -263,7 +269,7 @@ class DeviceCycleService:
             target_type="DEVICE_QUOTA_CYCLE",
             target_id=str(cycle.id),
             result=cycle.status,
-            parameters_summary={"task_id": context.task_id, "org_id": self.org_id},
+            parameters_summary={"task_id": context.task_id, "org_id": self.org_id, **round_quota_summary(cycle)},
         )
 
     def _now(self) -> datetime:

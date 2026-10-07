@@ -124,6 +124,11 @@ async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=T
         async with engine.connect() as connection:
             def compare(sync_connection):
                 def include(obj, name, kind, reflected, compare_to):
+                    if not (include_c3 and include_d2 and include_import and include_reset_notices) and name in {
+                        "estimated_total_usd", "estimate_used_usd", "estimate_percent", "estimate_snapshot_at", "estimate_recorded_at",
+                        "estimate_blocked", "opening_limit_usd", "quota_source_cycle_id", "quota_source_estimate_usd", "quota_reason", "fk_cycle_quota_source",
+                    }:
+                        return False
                     if name in {"imported_used_usd", "ck_device_usage_segments_imported_used_range"} and (not include_import or not include_c3 or not include_d2):
                         return False
                     if kind == "table":

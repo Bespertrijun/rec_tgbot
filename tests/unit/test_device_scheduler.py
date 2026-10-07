@@ -175,3 +175,38 @@ async def test_notification_transport_failure_does_not_fail_successful_statistic
     jobs.device_account_notifications = SimpleNamespace(deliver_pending=AsyncMock(side_effect=RuntimeError("notice transport unavailable")))
     assert await jobs.run_tick() == 3
     assert jobs.status()["last_tick_error"] is None
+
+
+async def test_estimate_saved_after_sampling_before_enforcement():
+    jobs, _, cycle, sampling, actions = setup_jobs()
+    calls = []
+    cycle.sync.side_effect = lambda: calls.append("cycle") or SimpleNamespace(task_id=1, id=2)
+    sampling.tick.side_effect = lambda: calls.append("sampling") or ()
+    jobs.device_account_usage = SimpleNamespace(record_estimate=AsyncMock(side_effect=lambda *a, **kw: calls.append("estimate")))
+    actions.run_once.side_effect = lambda **kw: calls.append("actions") or 0
+    await jobs.run_tick()
+    assert calls == ["cycle", "sampling", "estimate", "actions"]
+    jobs.device_account_usage.record_estimate.assert_awaited_once_with(1, expected_cycle_id=2)
+
+
+@pytest.mark.parametrize("phase", ["cycle", "sampling", "estimate"])
+async def test_estimation_failure_never_prevents_normal_quota_actions(phase):
+    jobs, _, cycle, sampling, actions = setup_jobs()
+    cycle.sync.return_value = SimpleNamespace(task_id=1, id=2)
+    jobs.device_account_usage = SimpleNamespace(record_estimate=AsyncMock())
+    operation = {"cycle": cycle.sync, "sampling": sampling.tick, "estimate": jobs.device_account_usage.record_estimate}[phase]
+    operation.side_effect = TimeoutError("unavailable")
+    await jobs.run_tick()
+    actions.run_once.assert_awaited_once()
+    if phase != "estimate":
+        jobs.device_account_usage.record_estimate.assert_not_called()
+
+
+async def test_retrying_device_sample_preserves_last_saved_estimate():
+    jobs, _, cycle, sampling, actions = setup_jobs()
+    cycle.sync.return_value = SimpleNamespace(task_id=1, id=2)
+    sampling.tick.return_value = (SimpleNamespace(status="COMPLETED"), SimpleNamespace(status="PENDING"))
+    jobs.device_account_usage = SimpleNamespace(record_estimate=AsyncMock())
+    await jobs.run_tick()
+    jobs.device_account_usage.record_estimate.assert_not_called()
+    actions.run_once.assert_awaited_once()

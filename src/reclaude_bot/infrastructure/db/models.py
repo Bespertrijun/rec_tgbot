@@ -435,6 +435,16 @@ class DeviceQuotaCycle(Base):
     weekly_percent: Mapped[Decimal | None] = mapped_column(MONEY)
     last_day_allow: Mapped[bool | None] = mapped_column(Boolean)
     last_day_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimated_total_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    estimate_used_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    estimate_percent: Mapped[Decimal | None] = mapped_column(MONEY)
+    estimate_snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimate_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimate_blocked: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    opening_limit_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    quota_source_cycle_id: Mapped[int | None] = mapped_column(ForeignKey("device_quota_cycles.id", name="fk_cycle_quota_source"))
+    quota_source_estimate_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    quota_reason: Mapped[str | None] = mapped_column(String(32))
 
 
 class DeviceCycleLedger(Base):

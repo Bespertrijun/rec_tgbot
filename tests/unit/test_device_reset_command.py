@@ -1,3 +1,4 @@
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,7 +18,8 @@ def setup():
     message = SimpleNamespace(from_user=SimpleNamespace(id=999), chat=SimpleNamespace(type="private", id=999),
                               message_id=321, answer=AsyncMock())
     result = SimpleNamespace(task_id=1, task_name="device", cycle_id=2, reset_at=NOW,
-                             device_count=4, user_count=4, replayed=False)
+                             device_count=4, user_count=4, replayed=False, opening_limit_usd=Decimal("575"),
+                             quota_source_estimate_usd=Decimal("2400"), quota_reason="PREVIOUS_ROUND_ESTIMATE")
     service = SimpleNamespace(reset=AsyncMock(return_value=result))
     return callback, message, service
 
@@ -56,6 +58,16 @@ async def test_reset_passes_operator_task_and_stable_message_idempotency_key():
     message.message_id += 1
     await callback(message, SimpleNamespace(args="device"), service)
     assert service.reset.await_args.kwargs["operation_key"] != key
+    text = message.answer.await_args.args[0]
+    assert "本轮起始每人额度：$575.00" in text and "上一轮预估 $2400.00" in text
+
+
+async def test_reset_reports_fallback_amount():
+    callback, message, service = setup()
+    service.reset.return_value.quota_source_estimate_usd = None
+    service.reset.return_value.quota_reason = "NO_VALID_ESTIMATE"
+    await callback(message, SimpleNamespace(args="device"), service)
+    assert "上一轮无有效预估，沿用现有额度" in message.answer.await_args.args[0]
 
 
 @pytest.mark.parametrize("error", [EligibilityError("设备用量查询失败，本次未重置"), RuntimeError("database unavailable")])

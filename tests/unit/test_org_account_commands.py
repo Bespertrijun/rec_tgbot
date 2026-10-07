@@ -144,10 +144,15 @@ async def test_named_task_details_survive_account_failure():
         last_tick_finished=None, last_tick_error=None, last_result_count=3))
     deps["recovery"].gate.get_state.return_value = SimpleNamespace(selected_account_id="4949", write_enabled=True, reason="ready")
     deps["recovery"].list_accounts.side_effect = RuntimeError("private error")
-    deps["device_cycle"].current.return_value = SimpleNamespace(status="VERIFIED", weekly_percent=Decimal("10"), reset_at=None)
+    deps["device_cycle"].current.return_value = SimpleNamespace(status="VERIFIED", weekly_percent=Decimal("10"), reset_at=None,
+                                                                             opening_limit_usd=Decimal("575"), quota_source_estimate_usd=Decimal("2400"),
+                                                                             quota_reason="PREVIOUS_ROUND_ESTIMATE", estimated_total_usd=Decimal("2700"),
+                                                                             estimate_snapshot_at=None, estimate_blocked=False)
     await handler(**kwargs)
     text = "\n".join(call.args[0] for call in message.answer.await_args_list)
     assert "vip" in text and "RUNNING" in text and "$700.00" in text and "VERIFIED" in text
+    assert "本轮起始每人额度：$575.00" in text and "上一轮预估 $2400.00" in text
+    assert "本轮已保存预估：≈$2700.00" in text
     assert "private error" not in text
 
 

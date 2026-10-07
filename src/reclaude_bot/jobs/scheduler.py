@@ -9,6 +9,7 @@ import structlog
 from reclaude_bot.application.actions import DeviceQuotaActionService, QuotaActionService
 from reclaude_bot.application.device_account_notifications import DeviceAccountNotificationService
 from reclaude_bot.application.device_account_reconcile import DeviceAccountReconcileService
+from reclaude_bot.application.device_account_usage import DeviceAccountUsageService
 from reclaude_bot.application.device_cycle import DeviceCycleService
 from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.quota import QuotaService
@@ -33,6 +34,7 @@ class BackgroundJobs:
         device_actions: DeviceQuotaActionService | None = None,
         device_account_reconcile: DeviceAccountReconcileService | None = None,
         device_account_notifications: DeviceAccountNotificationService | None = None,
+        device_account_usage: DeviceAccountUsageService | None = None,
     ) -> None:
         device_services = (device_cycle, device_sampling, device_actions)
         if any(service is not None for service in device_services) and not all(
@@ -46,6 +48,7 @@ class BackgroundJobs:
         self.device_actions = device_actions
         self.device_account_reconcile = device_account_reconcile
         self.device_account_notifications = device_account_notifications
+        self.device_account_usage = device_account_usage
         self.onboarding = onboarding
         self.task_service = task_service
         self.gate = getattr(actions, "gate", None)
@@ -205,8 +208,9 @@ class BackgroundJobs:
                     # exception escape before sampling or quota actions can
                     # continue against stale cycle evidence.
                     await self.device_account_reconcile.reconcile()
+                cycle = None
                 try:
-                    await self.device_cycle.sync()
+                    cycle = await self.device_cycle.sync()
                 except AuthenticationCircuitOpen:
                     raise
                 except Exception as exc:
@@ -226,6 +230,15 @@ class BackgroundJobs:
                         error_type=type(exc).__name__,
                         authentication_circuit=isinstance(exc, AuthenticationCircuitOpen),
                     )
+                else:
+                    if (cycle is not None and self.device_account_usage is not None
+                            and not any(getattr(item, "status", None) == "PENDING" for item in sampled)):
+                        try:
+                            await self.device_account_usage.record_estimate(cycle.task_id, expected_cycle_id=cycle.id)
+                        except AuthenticationCircuitOpen:
+                            raise
+                        except Exception as exc:
+                            log.warning("device_estimate_record_failed", error_type=type(exc).__name__)
                 actions = await self.device_actions.run_once(now=now)
                 result = len(sampled) + actions
         except asyncio.CancelledError:

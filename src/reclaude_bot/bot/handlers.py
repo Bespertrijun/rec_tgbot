@@ -591,6 +591,11 @@ def build_admin_router(settings: Settings) -> Router:
                 else:
                     weekly = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
                     lines.append(f"设备周期：{cycle.status} | 周用量 {weekly} | 刷新 {_format_datetime(cycle.reset_at)}")
+                    lines.extend(_round_quota_lines(cycle.opening_limit_usd, cycle.quota_source_estimate_usd, cycle.quota_reason))
+                    if cycle.estimated_total_usd is not None:
+                        lines.append(f"本轮已保存预估：≈${cycle.estimated_total_usd:.2f}（快照 {_format_datetime(cycle.estimate_snapshot_at)}）")
+                    if cycle.estimate_blocked:
+                        lines.append("本轮预估更新已暂停：检测到账号用量重置或变化，请在 REC 重置后执行 /reset")
         except DomainError as exc:
             await message.answer(html.escape(str(exc)))
             return
@@ -631,7 +636,8 @@ def build_admin_router(settings: Settings) -> Router:
         await message.answer(
             f"任务 {html.escape(values[0])} 已重置为新本地周期：设备 {result.device_count} 个，"
             f"范围内用户 {result.user_count} 个，REC 周期刷新 {_format_datetime(result.reset_at)}。"
-            "旧账本和审计历史已保留。"
+            "旧账本和审计历史已保留。\n"
+            + "\n".join(_round_quota_lines(result.opening_limit_usd, result.quota_source_estimate_usd, result.quota_reason))
         )
 
     @router.message(Command("taskusers"))
@@ -926,6 +932,17 @@ async def _account_inventory_lines(recovery: RecoveryService) -> list[str]:
         health = html.escape(account.health or "unknown")
         marker = " [当前]" if selected is not None and str(account.account_id).strip() == selected.strip() else ""
         lines.append(f"- {account_id}{marker} | {email} | lifecycle={lifecycle} | health={health}")
+    return lines
+
+
+def _round_quota_lines(limit: Decimal | None, estimate: Decimal | None, reason: str | None) -> list[str]:
+    if limit is None:
+        return []
+    lines = [f"本轮起始每人额度：${limit:.2f}"]
+    if reason == "PREVIOUS_ROUND_ESTIMATE" and estimate is not None:
+        lines.append(f"额度来源：上一轮预估 ${estimate:.2f}，扣除 $100 后除以 4（最低 $0，向下保留两位小数）")
+    elif reason == "NO_VALID_ESTIMATE":
+        lines.append("额度来源：上一轮无有效预估，沿用现有额度")
     return lines
 
 

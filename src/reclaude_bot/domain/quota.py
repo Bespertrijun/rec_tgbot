@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
+
 ZERO = Decimal("0.00")
 DEFAULT_QUOTA_LIMIT = Decimal("700.00")
 
@@ -33,7 +35,7 @@ def ensure_utc(value: datetime) -> datetime:
 def same_cycle_reset(left: datetime, right: datetime) -> bool:
     """Return whether two cycle reset timestamps are within the five-minute tolerance."""
 
-    return abs(ensure_utc(left) - ensure_utc(right)) <= timedelta(minutes=5)
+    return abs(ensure_utc(left) - ensure_utc(right)) <= CLOCK_SKEW_TOLERANCE
 
 
 def is_last_24h(now: datetime, reset_at: datetime) -> bool:

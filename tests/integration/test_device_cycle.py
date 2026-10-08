@@ -80,7 +80,7 @@ async def test_invalid_account_evidence_cannot_grant_last_day_permission(lifecyc
     if case == "unbound":
         kwargs["status"] = "unbound"
     elif case == "future":
-        kwargs["sampled_at"] = NOW + timedelta(seconds=1)
+        kwargs["sampled_at"] = NOW + timedelta(seconds=301)
     else:
         kwargs["account_id"] = None
     service, _, _ = cycle_fixture(factory, snapshot(**kwargs))

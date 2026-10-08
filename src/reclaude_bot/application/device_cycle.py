@@ -15,7 +15,7 @@ from reclaude_bot.application.device_context import DeviceTaskContext, OrgAccoun
 from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
 from reclaude_bot.domain.enums import CycleStatus
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import as_decimal, ensure_utc, is_last_24h, same_cycle_reset
+from reclaude_bot.domain.quota import CLOCK_SKEW_TOLERANCE, as_decimal, ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import DeviceQuotaCycle, DeviceTaskScope, QuotaTask
 from reclaude_bot.infrastructure.reclaude.models import MeResponse
 
@@ -239,7 +239,7 @@ class DeviceCycleService:
         source_valid = (
             usage.account_id is not None
             and usage.me.current_account.status.strip().casefold() == "bound"
-            and age >= timedelta(0)
+            and age >= -CLOCK_SKEW_TOLERANCE
         )
         return _CycleEvidence(
             account_id=usage.account_id,

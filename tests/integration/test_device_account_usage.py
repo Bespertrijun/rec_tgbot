@@ -48,6 +48,18 @@ async def seeded(factory, *, total="120"):
     return cycle_id, association_id, ledger_id
 
 
+@pytest.mark.parametrize("ahead, valid", [(2.620, True), (300, True), (300.001, False)])
+async def test_record_estimate_accepts_only_bounded_clock_skew(lifecycle_db, ahead, valid):
+    factory, _ = lifecycle_db
+    cycle_id, _, _ = await seeded(factory)
+    usage = source_usage(sampled_at=NOW + timedelta(seconds=ahead))
+    app, _ = service(factory, usage)
+    assert await app.record_estimate(1, expected_cycle_id=cycle_id) is valid
+    async with factory() as session:
+        cycle = await session.get(DeviceQuotaCycle, cycle_id)
+        assert (cycle.estimated_total_usd is not None) is valid
+
+
 @pytest.mark.parametrize("is_active", [False, True])
 async def test_estimate_uses_confirmed_spend_and_is_read_only(lifecycle_db, is_active):
     factory, _ = lifecycle_db
@@ -165,7 +177,7 @@ async def test_invalid_cycle_or_source_degrades_without_mutating_usage(lifecycle
     cycle_id, _, _ = await seeded(factory, total="0" if case == "zero_spend" else "120")
     usage = source_usage(percent="0" if case == "zero_percent" else "10")
     if case == "future_source":
-        usage.me.current_account.usage_updated_at = NOW + timedelta(seconds=1)
+        usage.me.current_account.usage_updated_at = NOW + timedelta(seconds=301)
     elif case == "wrong_account":
         usage = source_usage(account_id="other")
     elif case == "wrong_window":

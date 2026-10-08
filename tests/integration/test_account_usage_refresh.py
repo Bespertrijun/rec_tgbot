@@ -68,7 +68,7 @@ async def test_explicit_refresh_bypasses_and_restarts_query_cooldown(app_context
     assert gateway.refresh_account_usage_calls == 2
 
 
-@pytest.mark.parametrize("outcome", ["fresh", "stale", "failed"])
+@pytest.mark.parametrize("outcome", ["fresh", "fresh_skew", "stale", "failed"])
 async def test_reset_refreshes_cached_snapshot_before_building_new_round(lifecycle_db, outcome):
     from reclaude_bot.domain.errors import EligibilityError
     from tests.integration.test_device_reset import database_state, reset_task, runtime
@@ -84,8 +84,9 @@ async def test_reset_refreshes_cached_snapshot_before_building_new_round(lifecyc
         rt.clock[0] += timedelta(seconds=1)
         if outcome == "failed":
             raise UpstreamError("refresh failed")
-        if outcome == "fresh":
-            rt.gateway.me.return_value = source_usage(percent="1", sampled_at=rt.clock[0]).me
+        if outcome in {"fresh", "fresh_skew"}:
+            skew = timedelta(seconds=2.620 if outcome == "fresh_skew" else 0)
+            rt.gateway.me.return_value = source_usage(percent="1", sampled_at=rt.clock[0] + skew).me
         # Network latency must not put the new snapshot before the new round.
         rt.clock[0] += timedelta(seconds=1)
 
@@ -96,7 +97,7 @@ async def test_reset_refreshes_cached_snapshot_before_building_new_round(lifecyc
         state = await session.get(ServiceState, 1)
         state.account_usage_refresh_attempted_at = rt.clock[0] - timedelta(minutes=5)
 
-    if outcome != "fresh":
+    if outcome not in {"fresh", "fresh_skew"}:
         with pytest.raises((EligibilityError, UpstreamError), match="快照仍未更新|refresh failed"):
             await reset_task(rt)
         after = await database_state(factory)

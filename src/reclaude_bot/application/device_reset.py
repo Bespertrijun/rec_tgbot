@@ -17,7 +17,7 @@ from reclaude_bot.application.device_cycle import DeviceCycleEvidence, DeviceCyc
 from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import ensure_utc, is_last_24h, same_cycle_reset
+from reclaude_bot.domain.quota import CLOCK_SKEW_TOLERANCE, ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import (
     AuditLog,
@@ -584,7 +584,7 @@ class DeviceTaskResetService:
                 f"REC 当前绑定账号 {evidence.account_id} 与本地已选账号 {selected_account_id} 不一致，"
                 "任务未重置；请通过 /task 查看账号状态"
             )
-        if evidence.usage_updated_at > evidence.received_at:
+        if evidence.usage_updated_at > evidence.received_at + CLOCK_SKEW_TOLERANCE:
             ahead = (evidence.usage_updated_at - evidence.received_at).total_seconds()
             raise EligibilityError(
                 f"REC 快照时间比机器人服务器时间晚 {ahead:.3f} 秒，任务未重置。"

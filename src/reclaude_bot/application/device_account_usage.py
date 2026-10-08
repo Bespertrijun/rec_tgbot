@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
@@ -12,7 +12,7 @@ from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshSe
 from reclaude_bot.application.audit import utcnow
 from reclaude_bot.application.device_context import OrgAccountSource, OrgAccountUsage
 from reclaude_bot.domain.errors import EligibilityError
-from reclaude_bot.domain.quota import ensure_utc, estimate_window_total, same_cycle_reset
+from reclaude_bot.domain.quota import CLOCK_SKEW_TOLERANCE, ensure_utc, estimate_window_total, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import (
     DeviceCycleLedger,
     DeviceQuotaCycle,
@@ -200,7 +200,7 @@ class DeviceAccountUsageService:
                         or usage.cycle_reset_at != ensure_utc(cycle.reset_at)):
                     return False
                 sampled_at = ensure_utc(usage.usage_updated_at)
-                if (sampled_at < ensure_utc(cycle.started_at) or sampled_at > moment
+                if (sampled_at < ensure_utc(cycle.started_at) or sampled_at > moment + CLOCK_SKEW_TOLERANCE
                         or (cycle.estimate_snapshot_at is not None and sampled_at <= ensure_utc(cycle.estimate_snapshot_at))):
                     return False
                 percent = usage.seven_day_utilization
@@ -350,7 +350,7 @@ class DeviceAccountUsageService:
             five_reset = ensure_utc(five_hour.resets_at)
 
         source_reason: str | None = None
-        if received_at - usage_updated_at < timedelta(0):
+        if received_at - usage_updated_at < -CLOCK_SKEW_TOLERANCE:
             source_reason = "账号快照时间无效"
         elif weekly_reset <= received_at or seven_day_reset <= received_at:
             source_reason = "账号周期已刷新"

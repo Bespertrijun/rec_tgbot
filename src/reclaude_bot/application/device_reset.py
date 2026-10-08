@@ -18,6 +18,7 @@ from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import ensure_utc, is_last_24h, same_cycle_reset
+from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import (
     AuditLog,
     DeviceAction,
@@ -576,12 +577,22 @@ class DeviceTaskResetService:
 
     @staticmethod
     def _validate_evidence(evidence: DeviceCycleEvidence, selected_account_id: str) -> None:
-        if (
-            not evidence.source_valid
-            or evidence.account_id is None
-            or str(evidence.account_id).strip() != selected_account_id
-        ):
-            raise EligibilityError("当前 Reclaude 账号或周周期数据未通过验证")
+        if evidence.account_id is None:
+            raise EligibilityError("REC 未返回可核实的绑定账号，任务未重置")
+        if str(evidence.account_id).strip() != selected_account_id:
+            raise EligibilityError(
+                f"REC 当前绑定账号 {evidence.account_id} 与本地已选账号 {selected_account_id} 不一致，"
+                "任务未重置；请通过 /task 查看账号状态"
+            )
+        if evidence.usage_updated_at > evidence.received_at:
+            ahead = (evidence.usage_updated_at - evidence.received_at).total_seconds()
+            raise EligibilityError(
+                f"REC 快照时间比机器人服务器时间晚 {ahead:.3f} 秒，任务未重置。"
+                f"快照：{format_beijing(evidence.usage_updated_at)}；"
+                f"服务器：{format_beijing(evidence.received_at)}。请检查服务器时间同步"
+            )
+        if not evidence.source_valid:
+            raise EligibilityError("REC 账号来源未通过验证，任务未重置；请通过 /task 查看绑定状态")
 
     def _ensure_gateway_account(self, expected_account_id: str) -> None:
         actual_account_id = self.gateway.account_id

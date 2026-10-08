@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.device_account_notifications import DeviceAccountNotificationService
 from reclaude_bot.application.device_context import SingleOrgTaskService
@@ -103,6 +104,7 @@ class DeviceTaskResetService:
         *,
         clock=utcnow,
         account_notifications: DeviceAccountNotificationService | None = None,
+        refresh: AccountUsageRefreshService | None = None,
     ) -> None:
         self.session_factory = factory
         self.gateway = gateway
@@ -112,6 +114,7 @@ class DeviceTaskResetService:
         self.ledger = DeviceLedgerService(factory, self.org_id, clock=clock)
         self.clock = clock
         self.account_notifications = account_notifications
+        self.refresh = refresh
 
     async def reset(
         self,
@@ -136,11 +139,19 @@ class DeviceTaskResetService:
             return existing
 
         plan = await self._read_plan(context.task_id, self._now(), lock=False)
+        # The upstream /me endpoint reads a stored snapshot. Explicit reset must
+        # bypass the normal query cooldown, with the cut preceding that refresh
+        # so its snapshot can belong to the new round.
+        refresh_started_at = self._now()
+        if self.refresh is not None:
+            await self.refresh.refresh_if_due(now=refresh_started_at, force=True)
         evidence = await self.cycle_service.fetch_fresh_evidence()
         target = target_account_id or plan.selected_account_id
         self._validate_evidence(evidence, target)
         self._ensure_gateway_account(target)
-        cut_at = evidence.received_at
+        cut_at = refresh_started_at if self.refresh is not None else evidence.received_at
+        if self.refresh is not None and evidence.usage_updated_at < cut_at:
+            raise EligibilityError("刷新后账号快照仍未更新，请稍后重试 /reset")
         if evidence.reset_at <= cut_at:
             raise EligibilityError("Reclaude 周期已重置，不能使用该响应重置任务")
 
@@ -171,6 +182,8 @@ class DeviceTaskResetService:
         # baselines from two upstream accounts.
         final_evidence = await self.cycle_service.fetch_fresh_evidence()
         self._validate_evidence(final_evidence, target)
+        if self.refresh is not None and final_evidence.usage_updated_at < cut_at:
+            raise EligibilityError("刷新后账号快照仍未更新，请稍后重试 /reset")
         if not same_cycle_reset(evidence.reset_at, final_evidence.reset_at):
             raise EligibilityError("重置期间 Reclaude 周期发生变化，不能提交任务重置")
         if any(item.sampled_at >= final_evidence.reset_at for item in baselines):

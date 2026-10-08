@@ -147,6 +147,7 @@ async def run() -> None:
         device_cycle,
         settings.reclaude_org_id,
         account_notifications=device_account_notifications,
+        refresh=AccountUsageRefreshService(session_factory, gateway),
     )
     device_account_reconcile = DeviceAccountReconcileService(
         session_factory,

@@ -57,6 +57,67 @@ async def test_query_can_refresh_even_when_background_sync_is_paused(app_context
     assert gateway.refresh_account_usage_calls == 1
 
 
+async def test_explicit_refresh_bypasses_and_restarts_query_cooldown(app_context):
+    factory, gateway, _ = app_context
+    await prepare(factory)
+    service = AccountUsageRefreshService(factory, gateway)
+    assert await service.refresh_if_due(now=NOW)
+    reset_at = NOW + timedelta(hours=1)
+    assert await service.refresh_if_due(now=reset_at, force=True)
+    assert not await service.refresh_if_due(now=NOW + timedelta(hours=3))
+    assert gateway.refresh_account_usage_calls == 2
+
+
+@pytest.mark.parametrize("outcome", ["fresh", "stale", "failed"])
+async def test_reset_refreshes_cached_snapshot_before_building_new_round(lifecycle_db, outcome):
+    from reclaude_bot.domain.errors import EligibilityError
+    from tests.integration.test_device_reset import database_state, reset_task, runtime
+
+    factory, _ = lifecycle_db
+    await seeded(factory)
+    rt = runtime(factory)
+    rt.gateway.me.return_value = source_usage(sampled_at=CYCLE_NOW).me
+    before = await database_state(factory)
+
+    async def refresh():
+        rt.gateway.me.assert_not_awaited()
+        rt.clock[0] += timedelta(seconds=1)
+        if outcome == "failed":
+            raise UpstreamError("refresh failed")
+        if outcome == "fresh":
+            rt.gateway.me.return_value = source_usage(percent="1", sampled_at=rt.clock[0]).me
+        # Network latency must not put the new snapshot before the new round.
+        rt.clock[0] += timedelta(seconds=1)
+
+    rt.gateway.refresh_account_usage = AsyncMock(side_effect=refresh)
+    rt.service.refresh = AccountUsageRefreshService(factory, rt.gateway)
+    # Ordinary query cooldown is active when the explicit reset arrives.
+    async with factory() as session, session.begin():
+        state = await session.get(ServiceState, 1)
+        state.account_usage_refresh_attempted_at = rt.clock[0] - timedelta(minutes=5)
+
+    if outcome != "fresh":
+        with pytest.raises((EligibilityError, UpstreamError), match="快照仍未更新|refresh failed"):
+            await reset_task(rt)
+        after = await database_state(factory)
+        # Only the durable refresh attempt is permitted to change on failure.
+        before.pop("service_state")
+        after.pop("service_state")
+        assert after == before
+        rt.gateway.device_usage.assert_not_awaited()
+    else:
+        result = await reset_task(rt)
+        summary = await DeviceAccountUsageService(
+            factory, rt.cycle.source, 178, clock=lambda: rt.clock[0], refresh=rt.service.refresh,
+        ).get_account_usage(1)
+        assert summary.cycle_id == result.cycle_id
+        assert summary.seven_day_utilization == 1
+        assert summary.usage_updated_at >= summary.cycle_started_at
+        assert summary.estimate_reason == "本周期托管设备消费为零"
+        assert (await reset_task(rt)).cycle_id == result.cycle_id
+    rt.gateway.refresh_account_usage.assert_awaited_once()
+
+
 async def test_queries_refresh_before_read_only_when_three_hours_have_elapsed(app_context, lifecycle_db):
     factory, _ = lifecycle_db
     _, gateway, _ = app_context

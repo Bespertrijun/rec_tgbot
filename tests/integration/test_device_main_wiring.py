@@ -90,6 +90,8 @@ async def test_main_injects_device_services_fresh_query_and_write_gate_without_l
             assert not (await session.get(ServiceState, 1)).write_enabled
     values = list(dispatchers[0].values())
     assert isinstance(dispatchers[0]["device_reset"], DeviceTaskResetService)
+    assert dispatchers[0]["device_reset"].refresh is not None
+    assert dispatchers[0]["device_reset"].refresh.gateway is gateway
     auth = next(value for value in values if isinstance(value, DeviceAuthorizationService))
     admin = next(value for value in values if isinstance(value, DeviceAdminService))
     actions = jobs_created[0].device_actions

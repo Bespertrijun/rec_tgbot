@@ -38,6 +38,7 @@ class DeviceCycleEvidence:
     source_valid: bool
     request_started_at: datetime
     received_at: datetime
+    usage_updated_at: datetime
 
 
 class DeviceCycleService:
@@ -178,6 +179,7 @@ class DeviceCycleService:
             source_valid=evidence.source_valid,
             request_started_at=request_started_at,
             received_at=received_at,
+            usage_updated_at=ensure_utc(usage.me.current_account.usage_updated_at),
         )
 
     async def current(self, task_name: str | None = None) -> DeviceQuotaCycle | None:

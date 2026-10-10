@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 
 from sqlalchemy import literal, or_, update
@@ -15,26 +16,31 @@ class AccountUsageRefreshService:
     def __init__(self, factory: async_sessionmaker[AsyncSession], gateway: ReclaudeGateway) -> None:
         self.factory = factory
         self.gateway = gateway
+        self._lock = asyncio.Lock()
 
-    async def refresh_if_due(self, *, now: datetime | None = None, force: bool = False) -> bool:
-        moment = ensure_utc(now or utcnow())
-        # Claim atomically and commit before the request. Failed requests (including
-        # 429), concurrent queries, and process restarts must all respect the cooldown.
-        async with self.factory() as session, session.begin():
-            claimed = await session.scalar(
-                update(ServiceState)
-                .where(
-                    ServiceState.id == 1,
-                    or_(
-                        literal(force),
-                        ServiceState.account_usage_refresh_attempted_at.is_(None),
-                        ServiceState.account_usage_refresh_attempted_at <= moment - timedelta(hours=3),
-                    ),
+    async def refresh_if_due(self, *, now: datetime | None = None, force: bool = False, expired_cycle: bool = False) -> bool:
+        async with self._lock:
+            moment = ensure_utc(now or utcnow())
+            # Expired windows must recover before reconciliation can run. Keep a
+            # durable retry bound even when REC keeps returning an expired window.
+            cooldown = timedelta(minutes=5) if expired_cycle else timedelta(hours=3)
+            # Claim atomically and commit before the request. Failed requests (including
+            # 429), concurrent queries, and process restarts must all respect the cooldown.
+            async with self.factory() as session, session.begin():
+                claimed = await session.scalar(
+                    update(ServiceState)
+                    .where(
+                        ServiceState.id == 1,
+                        or_(
+                            literal(force),
+                            ServiceState.account_usage_refresh_attempted_at.is_(None),
+                            ServiceState.account_usage_refresh_attempted_at <= moment - cooldown,
+                        ),
+                    )
+                    .values(account_usage_refresh_attempted_at=moment)
+                    .returning(ServiceState.id)
                 )
-                .values(account_usage_refresh_attempted_at=moment)
-                .returning(ServiceState.id)
-            )
-        if claimed is None:
-            return False
-        await self.gateway.refresh_account_usage()
-        return True
+            if claimed is None:
+                return False
+            await self.gateway.refresh_account_usage()
+            return True

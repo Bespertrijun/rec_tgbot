@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
 from reclaude_bot.application.audit import audit, utcnow
 from reclaude_bot.application.device_context import DeviceTaskContext, OrgAccountSource, OrgAccountUsage, SingleOrgTaskService
 from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
@@ -50,6 +51,7 @@ class DeviceCycleService:
         *,
         max_snapshot_age_seconds: int | float = 90,
         clock: Callable[[], datetime] = utcnow,
+        refresh: AccountUsageRefreshService | None = None,
     ) -> None:
         if (
             isinstance(org_id, bool)
@@ -70,6 +72,7 @@ class DeviceCycleService:
         self.org_id = self.task_service.org_id
         self.max_snapshot_age_seconds = float(max_snapshot_age_seconds)
         self.clock = clock
+        self.refresh = refresh
 
     async def sync(self, task_name: str | None = None) -> DeviceQuotaCycle:
         context = await self.task_service.resolve_task(task_name)
@@ -169,7 +172,7 @@ class DeviceCycleService:
         """Fetch and validate live account/cycle evidence without mutating local cycles."""
 
         request_started_at = self._now()
-        usage = await self.source.get_usage(self.org_id)
+        usage = await self.fetch_usage()
         received_at = self._now()
         evidence = self._validate_usage(usage, received_at)
         return DeviceCycleEvidence(
@@ -181,6 +184,27 @@ class DeviceCycleService:
             received_at=received_at,
             usage_updated_at=ensure_utc(usage.me.current_account.usage_updated_at),
         )
+
+    async def fetch_usage(self) -> OrgAccountUsage:
+        """Recover expired upstream cache before account or cycle validation."""
+        usage = await self.source.get_usage(self.org_id)
+        if self.refresh is None:
+            return usage
+        try:
+            raw_reset_at = usage.me.weekly_all().resets_at
+            if raw_reset_at is None:
+                return usage
+            reset_at = ensure_utc(raw_reset_at)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # Leave malformed evidence to the normal validator.
+            return usage
+        now = self._now()
+        if reset_at <= now:
+            await self.refresh.refresh_if_due(now=now, expired_cycle=True)
+            # A competing caller may have completed the refresh while we waited.
+            # Always re-read through the account-bracketed source.
+            usage = await self.source.get_usage(self.org_id)
+        return usage
 
     async def current(self, task_name: str | None = None) -> DeviceQuotaCycle | None:
         context = await self.task_service.resolve_task(task_name)

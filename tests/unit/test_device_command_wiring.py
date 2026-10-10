@@ -4,10 +4,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.filters import Command
+from structlog.testing import capture_logs
 
 from reclaude_bot.bot.commands import admin_commands, user_commands
 from reclaude_bot.bot.handlers import build_admin_router, build_router
 from reclaude_bot.config import Settings
+from reclaude_bot.domain.errors import EligibilityError
 
 
 def settings():
@@ -94,7 +96,54 @@ async def test_manual_sync_failure_never_samples_previous_account():
     message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
     kwargs, deps = parameters(callback, message, "")
     deps["device_account_reconcile"].reconcile.side_effect = TimeoutError("unavailable")
-    await callback(**kwargs)
+    with capture_logs() as logs:
+        await callback(**kwargs)
     deps["device_cycle"].sync.assert_not_called()
     deps["device_sampling"].tick.assert_not_called()
     assert "同步失败" in message.answer.await_args.args[0]
+    event = next(row for row in logs if row.get("event") == "device_manual_sync_failed")
+    assert event["stage"] == "reconcile"
+    assert event["error_type"] == "TimeoutError"
+    assert event["traceback"]
+    assert "unavailable" not in repr(logs)
+
+
+@pytest.mark.parametrize(
+    ("stage", "dependency"),
+    [("reconcile", "device_account_reconcile"), ("cycle", "device_cycle"), ("sampling", "device_sampling")],
+)
+async def test_manual_sync_failure_logs_the_failing_stage(stage, dependency):
+    callback = command_callbacks(build_admin_router(settings()))["sync"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    kwargs, deps = parameters(callback, message, "")
+    failure = RuntimeError("private sync response")
+    method = {"device_account_reconcile": "reconcile", "device_cycle": "sync", "device_sampling": "tick"}[dependency]
+    getattr(deps[dependency], method).side_effect = failure
+
+    with capture_logs() as logs:
+        await callback(**kwargs)
+
+    event = next(row for row in logs if row.get("event") == "device_manual_sync_failed")
+    assert event["stage"] == stage
+    assert event["error_type"] == "RuntimeError"
+    assert event["traceback"]
+    assert "private sync response" not in repr(logs)
+    assert message.answer.await_args.args[0] == "同步失败，已记录告警。"
+
+
+async def test_manual_sync_shows_escaped_eligibility_reason():
+    callback = command_callbacks(build_admin_router(settings()))["sync"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    kwargs, deps = parameters(callback, message, "")
+    deps["device_cycle"].sync.side_effect = EligibilityError("周期 <无效>")
+
+    with capture_logs() as logs:
+        await callback(**kwargs)
+
+    event = next(row for row in logs if row.get("event") == "device_manual_sync_failed")
+    assert event["stage"] == "cycle"
+    assert event["error_type"] == "EligibilityError"
+    assert event["traceback"]
+    assert message.answer.await_args.args[0] == "同步失败：周期 &lt;无效&gt;"
+    assert "周期 <无效>" not in message.answer.await_args.args[0]
+    assert "周期 <无效>" not in repr(logs)

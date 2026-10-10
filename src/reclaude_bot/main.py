@@ -96,16 +96,18 @@ async def run() -> None:
     task = QuotaTaskService(session_factory, gateway, org_id=settings.reclaude_org_id)
     device_quota = DeviceQuotaService(session_factory, settings.reclaude_org_id)
     device_account_source = SingleOrgAccountSource(gateway, settings.reclaude_org_id)
+    account_usage_refresh = AccountUsageRefreshService(session_factory, gateway)
     device_cycle = DeviceCycleService(
         session_factory,
         device_account_source,
         settings.reclaude_org_id,
+        refresh=account_usage_refresh,
     )
     device_account_usage = DeviceAccountUsageService(
         session_factory,
         device_account_source,
         settings.reclaude_org_id,
-        refresh=AccountUsageRefreshService(session_factory, gateway),
+        refresh=account_usage_refresh,
     )
     device_collector = DeviceUsageCollector(session_factory, gateway, settings.reclaude_org_id)
     device_ledger = DeviceLedgerService(session_factory, settings.reclaude_org_id)
@@ -147,7 +149,7 @@ async def run() -> None:
         device_cycle,
         settings.reclaude_org_id,
         account_notifications=device_account_notifications,
-        refresh=AccountUsageRefreshService(session_factory, gateway),
+        refresh=account_usage_refresh,
     )
     device_account_reconcile = DeviceAccountReconcileService(
         session_factory,

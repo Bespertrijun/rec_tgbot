@@ -299,16 +299,33 @@ def build_admin_router(settings: Settings) -> Router:
     ) -> None:
         if not is_admin(message):
             return
+        stage = "reconcile"
         try:
             await device_account_reconcile.reconcile(operator_id=message.from_user.id)  # type: ignore[union-attr]
+            stage = "cycle"
             cycle = await device_cycle.sync()
+            stage = "sampling"
             samples = await device_sampling.tick()
             percent = f"{cycle.weekly_percent:.2f}%" if cycle.weekly_percent is not None else "未知"
             await message.answer(
                 f"设备周期同步完成：{cycle.status} | 账号 {html.escape(str(cycle.account_id or '未知'))} | "
                 f"周用量 {percent} | 补采任务处理 {len(samples)} 个"
             )
-        except Exception:
+        except EligibilityError as exc:
+            log.warning(
+                "device_manual_sync_failed",
+                stage=stage,
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
+            await message.answer(f"同步失败：{html.escape(str(exc))}")
+        except Exception as exc:
+            log.error(
+                "device_manual_sync_failed",
+                stage=stage,
+                error_type=type(exc).__name__,
+                traceback="".join(traceback.format_tb(exc.__traceback__)),
+            )
             await message.answer("同步失败，已记录告警。")
 
     @router.message(Command("member"))

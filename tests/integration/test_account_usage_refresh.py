@@ -148,3 +148,23 @@ async def test_queries_refresh_before_read_only_when_three_hours_have_elapsed(ap
     assert calls.count("refresh") == 1
     await service.get_account_usage(1)
     assert calls == ["refresh", "read", "read", "refresh", "read"]
+
+
+@pytest.mark.parametrize("lifecycle_db", ["postgresql"], indirect=True)
+async def test_expired_cycle_retry_is_atomic_and_survives_restart(lifecycle_db):
+    import asyncio
+
+    factory, _ = lifecycle_db
+    await prepare(factory)
+    gateway = SimpleNamespace(refresh_account_usage=AsyncMock())
+    first = AccountUsageRefreshService(factory, gateway)
+    second = AccountUsageRefreshService(factory, gateway)
+    assert sorted(await asyncio.gather(
+        first.refresh_if_due(now=NOW, expired_cycle=True),
+        second.refresh_if_due(now=NOW, expired_cycle=True),
+    )) == [False, True]
+    restarted = AccountUsageRefreshService(factory, gateway)
+    assert not await restarted.refresh_if_due(now=NOW + timedelta(minutes=5, microseconds=-1), expired_cycle=True)
+    assert await restarted.refresh_if_due(now=NOW + timedelta(minutes=5), expired_cycle=True)
+    assert not await restarted.refresh_if_due(now=NOW + timedelta(hours=1))
+    assert gateway.refresh_account_usage.await_count == 2

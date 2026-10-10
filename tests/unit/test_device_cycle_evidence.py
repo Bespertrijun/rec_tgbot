@@ -54,3 +54,14 @@ async def test_snapshot_clock_skew_has_same_boundary_for_cycle_reset_and_summary
         with pytest.raises(EligibilityError, match="快照时间"):
             DeviceTaskResetService._validate_evidence(evidence, "7055")
         assert summary.source_reason == "账号快照时间无效"
+
+
+async def test_valid_cycle_does_not_request_rollover_refresh():
+    me = MeResponse.model_validate(json.loads((Path(__file__).parents[1] / "fixtures" / "me.json").read_text()))
+    usage = OrgAccountUsage(org_id=178, account_id="7055", me=me)
+    source = SimpleNamespace(get_usage=AsyncMock(return_value=usage))
+    refresh = SimpleNamespace(refresh_if_due=AsyncMock())
+    service = DeviceCycleService(None, source, 178, clock=lambda: NOW, refresh=refresh)
+    await service.fetch_fresh_evidence()
+    refresh.refresh_if_due.assert_not_awaited()
+    source.get_usage.assert_awaited_once_with(178)

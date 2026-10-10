@@ -77,7 +77,7 @@ class DeviceAccountReconcileService:
         async with self._lock:
             try:
                 context = await SingleOrgTaskService(self.session_factory, self.org_id).resolve_task(task_name)
-                usage = await self.source.get_usage(self.org_id)
+                usage = await self.cycle_service.fetch_usage()
                 account_id = self._validate_usage(usage)
             except Exception:
                 await self._disable_after_failure()

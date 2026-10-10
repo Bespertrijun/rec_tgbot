@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select
 
+from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
 from reclaude_bot.application.device_account_usage import DeviceAccountUsageService
 from reclaude_bot.application.device_context import SingleOrgAccountSource, SingleOrgTaskService
 from reclaude_bot.application.device_cycle import DeviceCycleService
@@ -466,3 +467,100 @@ async def test_reset_evidence_uses_same_five_minute_tolerance(lifecycle_db, seco
             assert state.selected_account_id == "7022" and not state.write_enabled
     async with factory() as session:
         assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == 20
+
+
+@pytest.mark.parametrize("outcome", ["fresh", "expired", "failed", "cooldown", "switched"])
+async def test_expired_cached_cycle_refreshes_before_reconcile_and_preserves_history(lifecycle_db, outcome):
+    factory, _ = lifecycle_db
+    old = await ready_cycle(factory)
+    _, ledger_id = await metered_user(factory, old, "123")
+    async with factory() as session, session.begin():
+        previous = await session.get(DeviceQuotaCycle, old)
+        from reclaude_bot.domain.quota import ensure_utc
+        now = ensure_utc(previous.reset_at) + timedelta(seconds=1)
+        reset_at = ensure_utc(previous.reset_at)
+        task = await session.get(QuotaTask, 1)
+        task.status = "RUNNING"
+        state = await session.get(ServiceState, 1)
+        # A recent ordinary query must not defer rollover recovery for 3 hours.
+        state.account_usage_refresh_attempted_at = now - timedelta(minutes=1 if outcome == "cooldown" else 10)
+    rt = runtime(factory, account_id=7022, now=now, reset=reset_at)
+
+    async def refresh():
+        if outcome == "failed":
+            raise TimeoutError("refresh unavailable")
+        if outcome in {"fresh", "switched"}:
+            rt.gateway.me.return_value = account_snapshot(sampled_at=now, reset=now + timedelta(days=7)).me
+        if outcome == "switched":
+            # The second full source read still checks account identity.
+            rt.gateway.accounts.side_effect = [accounts(7022), accounts(8123)]
+
+    rt.gateway.refresh_account_usage = AsyncMock(side_effect=refresh)
+    rt.cycle.refresh = AccountUsageRefreshService(factory, rt.gateway)
+    if outcome == "fresh":
+        result = await rt.reconcile()
+        assert result.status == "UNCHANGED"
+        created = await rt.cycle.sync()
+        assert created.id != old and created.account_id == "7022"
+        assert (await rt.cycle.sync()).id == created.id
+        assert await cycle_count(factory) == 2
+    else:
+        with pytest.raises((EligibilityError, TimeoutError)):
+            await rt.reconcile()
+        assert await cycle_count(factory) == 1
+        async with factory() as session:
+            assert not (await session.get(ServiceState, 1)).write_enabled
+        if outcome in {"expired", "failed"}:
+            # A retry in the same minute cannot flood the upstream refresh API.
+            with pytest.raises(EligibilityError, match="周期重置时间"):
+                await rt.reconcile()
+    assert rt.gateway.refresh_account_usage.await_count == (0 if outcome == "cooldown" else 1)
+    async with factory() as session:
+        assert (await session.get(DeviceCycleLedger, ledger_id)).confirmed_used_usd == 123
+    rt.gateway.device_usage.assert_not_awaited()
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_rollover_waits_for_inflight_query_refresh_before_reconcile(lifecycle_db, force):
+    factory, _ = lifecycle_db
+    old = await ready_cycle(factory)
+    from reclaude_bot.domain.quota import ensure_utc
+    async with factory() as session, session.begin():
+        reset_at = ensure_utc((await session.get(DeviceQuotaCycle, old)).reset_at)
+        (await session.get(QuotaTask, 1)).status = "RUNNING"
+    now = reset_at + timedelta(seconds=1)
+    rt = runtime(factory, account_id=7022, now=now, reset=reset_at)
+    started, release, read_expired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def refresh():
+        started.set()
+        await release.wait()
+        rt.gateway.me.return_value = account_snapshot(sampled_at=now, reset=now + timedelta(days=7)).me
+
+    original_read = rt.source.get_usage
+
+    async def read(org_id):
+        value = await original_read(org_id)
+        if value.me.weekly_all().resets_at == reset_at:
+            read_expired.set()
+        return value
+
+    rt.source.get_usage = read
+    rt.gateway.refresh_account_usage = AsyncMock(side_effect=refresh)
+    rt.cycle.refresh = AccountUsageRefreshService(factory, rt.gateway)
+    query = asyncio.create_task(rt.cycle.refresh.refresh_if_due(now=now, force=force))
+    reconcile = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        reconcile = asyncio.create_task(rt.reconcile())
+        await asyncio.wait_for(read_expired.wait(), timeout=5)
+        assert not reconcile.done()
+        release.set()
+        await asyncio.wait_for(query, timeout=5)
+        assert (await asyncio.wait_for(reconcile, timeout=5)).status == "UNCHANGED"
+        async with factory() as session:
+            assert (await session.get(ServiceState, 1)).write_enabled
+        rt.gateway.refresh_account_usage.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.gather(query, *([reconcile] if reconcile else []), return_exceptions=True)

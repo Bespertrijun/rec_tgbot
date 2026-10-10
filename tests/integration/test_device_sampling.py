@@ -12,7 +12,7 @@ from reclaude_bot.application.device import DeviceAuthorizationService
 from reclaude_bot.application.device_admin import DeviceAdminService
 from reclaude_bot.application.device_revocation import DeviceRevocationService
 from reclaude_bot.application.device_sampling import DeviceSamplingService
-from reclaude_bot.domain.errors import AuthenticationCircuitOpen
+from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError
 from reclaude_bot.infrastructure.db.models import DeviceAction, DeviceAssociation, DeviceResampleJob, User
 from reclaude_bot.infrastructure.reclaude.models import DeviceRevokeResponse
 from tests.integration.test_device_admin import record
@@ -277,6 +277,48 @@ async def test_tick_coalesces_active_polling_and_works_while_task_stopped(lifecy
     assert rows[-1].status == "COMPLETED"
     assert stack.gateway.device_usage.await_count == 2
     assert (await ledger_rows(factory))[0].confirmed_used_usd == Decimal("25")
+
+
+async def test_tick_forces_active_sample_after_cutoff_and_coalesces_repeated_tick(lifecycle_db):
+    factory, _ = lifecycle_db
+    await cycle(factory)
+    stack = wired(factory)
+    await stack.auth.auth(1, LINK)
+    cutoff = NOW + timedelta(seconds=30)
+    stack.clock[0] = NOW + timedelta(seconds=31)
+
+    await stack.sampling.tick(sample_since=cutoff)
+    rows = await jobs(factory)
+    assert len(rows) == 2 and rows[-1].sequence >= 8
+    assert rows[-1].status == "COMPLETED"
+    assert stack.gateway.device_usage.await_count == 2
+
+    await stack.sampling.tick(sample_since=cutoff)
+    assert len(await jobs(factory)) == 2
+    assert stack.gateway.device_usage.await_count == 2
+
+
+async def test_tick_cutoff_respects_pending_sample_job(lifecycle_db):
+    factory, _ = lifecycle_db
+    await cycle(factory)
+    stack = wired(factory)
+    stack.gateway.device_usage.side_effect = RuntimeError("unavailable")
+    await stack.auth.auth(1, LINK)
+    stack.clock[0] = NOW + timedelta(seconds=30)
+
+    await stack.sampling.tick(sample_since=NOW + timedelta(seconds=10))
+    rows = await jobs(factory)
+    assert len(rows) == 1 and rows[0].status == "PENDING"
+    assert stack.gateway.device_usage.await_count == 1
+
+
+async def test_tick_rejects_future_sampling_cutoff(lifecycle_db):
+    factory, _ = lifecycle_db
+    await cycle(factory)
+    stack = wired(factory)
+
+    with pytest.raises(EligibilityError, match="采样起始时间不能晚于当前时间"):
+        await stack.sampling.tick(sample_since=NOW + timedelta(seconds=1))
 
 
 async def test_pending_first_sample_coalesces_polling_instead_of_growing_queue(lifecycle_db):

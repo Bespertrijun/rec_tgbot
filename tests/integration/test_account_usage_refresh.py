@@ -168,3 +168,41 @@ async def test_expired_cycle_retry_is_atomic_and_survives_restart(lifecycle_db):
     assert await restarted.refresh_if_due(now=NOW + timedelta(minutes=5), expired_cycle=True)
     assert not await restarted.refresh_if_due(now=NOW + timedelta(hours=1))
     assert gateway.refresh_account_usage.await_count == 2
+
+
+@pytest.mark.parametrize("lifecycle_db", ["postgresql"], indirect=True)
+@pytest.mark.parametrize("seconds_left,expected", [(61, False), (60, True), (1, True), (0, False), (-1, False)])
+async def test_final_minute_refresh_bypasses_query_cooldown_once(lifecycle_db, seconds_left, expected):
+    factory, _ = lifecycle_db
+    await prepare(factory)
+    gateway = SimpleNamespace(refresh_account_usage=AsyncMock())
+    service = AccountUsageRefreshService(factory, gateway)
+    reset = NOW + timedelta(minutes=10)
+    assert await service.refresh_if_due(now=NOW)
+    moment = reset - timedelta(seconds=seconds_left)
+    assert await service.refresh_if_due(now=moment, before_reset_at=reset) is expected
+    restarted = AccountUsageRefreshService(factory, gateway)
+    assert not await restarted.refresh_if_due(now=moment, before_reset_at=reset)
+    assert gateway.refresh_account_usage.await_count == 1 + expected
+
+
+@pytest.mark.parametrize("lifecycle_db", ["postgresql"], indirect=True)
+@pytest.mark.parametrize("failed", [False, True])
+async def test_final_minute_refresh_claim_survives_concurrency_and_failure(lifecycle_db, failed):
+    import asyncio
+
+    factory, _ = lifecycle_db
+    await prepare(factory)
+    async with factory() as session, session.begin():
+        (await session.get(ServiceState, 1)).account_usage_refresh_attempted_at = NOW - timedelta(minutes=2)
+    gateway = SimpleNamespace(refresh_account_usage=AsyncMock(side_effect=TimeoutError("unavailable") if failed else None))
+    reset = NOW + timedelta(minutes=1)
+    results = await asyncio.gather(*(
+        AccountUsageRefreshService(factory, gateway).refresh_if_due(now=NOW, before_reset_at=reset)
+        for _ in range(2)
+    ), return_exceptions=True)
+    assert results.count(False) == 1
+    assert sum(isinstance(result, TimeoutError) for result in results) == int(failed)
+    assert results.count(True) == int(not failed)
+    assert not await AccountUsageRefreshService(factory, gateway).refresh_if_due(now=NOW + timedelta(seconds=10), before_reset_at=reset)
+    gateway.refresh_account_usage.assert_awaited_once()

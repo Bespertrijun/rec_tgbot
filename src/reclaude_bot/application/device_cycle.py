@@ -186,7 +186,7 @@ class DeviceCycleService:
         )
 
     async def fetch_usage(self) -> OrgAccountUsage:
-        """Recover expired upstream cache before account or cycle validation."""
+        """Refresh ending or expired upstream cycles before validation."""
         usage = await self.source.get_usage(self.org_id)
         if self.refresh is None:
             return usage
@@ -199,8 +199,11 @@ class DeviceCycleService:
             # Leave malformed evidence to the normal validator.
             return usage
         now = self._now()
-        if reset_at <= now:
-            await self.refresh.refresh_if_due(now=now, expired_cycle=True)
+        if reset_at <= now or reset_at - now <= timedelta(minutes=1):
+            await self.refresh.refresh_if_due(
+                now=now, expired_cycle=reset_at <= now,
+                before_reset_at=reset_at if reset_at > now else None,
+            )
             # A competing caller may have completed the refresh while we waited.
             # Always re-read through the account-bracketed source.
             usage = await self.source.get_usage(self.org_id)

@@ -106,10 +106,16 @@ class DeviceSamplingService:
                 raise EligibilityError("设备关联没有已确认的撤销结果")
             return await self._schedule_after_revoke(association_id, ended_at)
 
-    async def tick(self, limit: int = 50) -> tuple[object, ...]:
+    async def tick(
+        self,
+        limit: int = 50,
+        *,
+        sample_since: datetime | None = None,
+    ) -> tuple[object, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > _MAX_LIMIT:
             raise EligibilityError(f"limit 必须在 1 到 {_MAX_LIMIT} 之间")
         now = self._now()
+        sample_since = self._validate_sample_since(sample_since, now)
         associations, jobs = await self._tick_state()
         for association in associations:
             association_jobs = jobs.get(association.association_id, ())
@@ -128,8 +134,15 @@ class DeviceSamplingService:
                 continue
             if any(job.status == "PENDING" for job in association_jobs):
                 continue
+            if sample_since is not None and any(
+                job.created_at >= sample_since for job in association_jobs
+            ):
+                continue
             last_created_at = max((job.created_at for job in association_jobs), default=None)
-            if last_created_at is None or now - last_created_at < timedelta(seconds=self.poll_seconds):
+            if (
+                sample_since is None
+                and (last_created_at is None or now - last_created_at < timedelta(seconds=self.poll_seconds))
+            ):
                 continue
             last_sequence = max((job.sequence for job in association_jobs), default=7)
             sequence = max(last_sequence, 7) + 1
@@ -398,6 +411,18 @@ class DeviceSamplingService:
             return ensure_utc(self.clock())
         except (TypeError, ValueError, OverflowError):
             raise EligibilityError("当前时间无效") from None
+
+    @staticmethod
+    def _validate_sample_since(sample_since: datetime | None, now: datetime) -> datetime | None:
+        if sample_since is None:
+            return None
+        try:
+            cutoff = ensure_utc(sample_since)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            raise EligibilityError("采样起始时间无效") from None
+        if cutoff > now:
+            raise EligibilityError("采样起始时间不能晚于当前时间")
+        return cutoff
 
 
 async def invoke_sampling_callback(

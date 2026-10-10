@@ -14,9 +14,11 @@ from reclaude_bot.application.device_context import OrgAccountSource, OrgAccount
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import CLOCK_SKEW_TOLERANCE, ensure_utc, estimate_window_total, same_cycle_reset
 from reclaude_bot.infrastructure.db.models import (
+    DeviceAssociation,
     DeviceCycleLedger,
     DeviceQuotaCycle,
     DeviceTaskScope,
+    DeviceUsageSegment,
     ServiceState,
 )
 
@@ -179,7 +181,7 @@ class DeviceAccountUsageService:
     async def get(self, task_id: int, *, now: datetime | None = None) -> DeviceAccountUsage:
         return await self.get_account_usage(task_id, now=now)
 
-    async def record_estimate(self, task_id: int, *, expected_cycle_id: int) -> bool:
+    async def record_estimate(self, task_id: int, *, expected_cycle_id: int, min_snapshot_at: datetime | None = None) -> bool:
         """Persist a validated estimate after sampling, without changing read APIs."""
         usage = await self.get_account_usage(task_id)
         moment = self._now()
@@ -200,6 +202,26 @@ class DeviceAccountUsageService:
                         or usage.cycle_reset_at != ensure_utc(cycle.reset_at)):
                     return False
                 sampled_at = ensure_utc(usage.usage_updated_at)
+                if min_snapshot_at is not None and sampled_at < ensure_utc(min_snapshot_at):
+                    return False
+                if min_snapshot_at is not None:
+                    fresh_segment = select(DeviceUsageSegment.id).join(
+                        DeviceCycleLedger, DeviceCycleLedger.id == DeviceUsageSegment.ledger_id,
+                    ).where(
+                        DeviceUsageSegment.association_id == DeviceAssociation.id,
+                        DeviceCycleLedger.cycle_id == cycle.id,
+                        DeviceUsageSegment.latest_sampled_at >= ensure_utc(min_snapshot_at),
+                    ).exists()
+                    unsampled = await session.scalar(select(DeviceAssociation.id).where(
+                        DeviceAssociation.task_id == task_id,
+                        DeviceAssociation.org_id == self.org_id,
+                        DeviceAssociation.state.in_(("ACTIVE", "PENDING_REVOKE", "UNKNOWN")),
+                        DeviceAssociation.device_id.is_not(None),
+                        DeviceAssociation.ended_at.is_(None),
+                        ~fresh_segment,
+                    ).limit(1))
+                    if unsampled is not None:
+                        return False
                 if (sampled_at < ensure_utc(cycle.started_at) or sampled_at > moment + CLOCK_SKEW_TOLERANCE
                         or (cycle.estimate_snapshot_at is not None and sampled_at <= ensure_utc(cycle.estimate_snapshot_at))):
                     return False

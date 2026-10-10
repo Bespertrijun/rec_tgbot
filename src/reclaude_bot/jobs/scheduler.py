@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import structlog
@@ -15,6 +15,7 @@ from reclaude_bot.application.device_sampling import DeviceSamplingService
 from reclaude_bot.application.quota import QuotaService
 from reclaude_bot.application.task import QuotaTaskService
 from reclaude_bot.domain.errors import AuthenticationCircuitOpen
+from reclaude_bot.domain.quota import ensure_utc
 from reclaude_bot.jobs.onboarding import OnboardingWorker
 from reclaude_bot.jobs.usage_poll import poll_once
 
@@ -60,6 +61,7 @@ class BackgroundJobs:
         self.last_tick_finished: datetime | None = None
         self.last_tick_error: str | None = None
         self.last_result_count: int | None = None
+        self._next_cycle_refresh_at: datetime | None = None
 
     async def start(self, *, start_quota: bool = True) -> None:
         self._shutdown.clear()
@@ -188,7 +190,14 @@ class BackgroundJobs:
                 # _run_tick records and logs failures; keep the loop alive.
                 pass
             try:
-                await asyncio.wait_for(self._quota_stop.wait(), timeout=poll_interval)
+                delay = poll_interval
+                if self._next_cycle_refresh_at is not None:
+                    delay = min(delay, max(0, (self._next_cycle_refresh_at - datetime.now(UTC)).total_seconds()))
+                    # Consume this wake-up even if the subsequent tick fails.
+                    # It will be rescheduled by the next successful cycle sync.
+                    if delay == 0:
+                        self._next_cycle_refresh_at = None
+                await asyncio.wait_for(self._quota_stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
 
@@ -209,8 +218,17 @@ class BackgroundJobs:
                     # continue against stale cycle evidence.
                     await self.device_account_reconcile.reconcile()
                 cycle = None
+                sample_since = None
                 try:
                     cycle = await self.device_cycle.sync()
+                    reset_at = getattr(cycle, "reset_at", None)
+                    if isinstance(reset_at, datetime):
+                        reset_at = ensure_utc(reset_at)
+                        moment = ensure_utc(now) if now is not None else datetime.now(UTC)
+                        deadline = reset_at - timedelta(minutes=1)
+                        self._next_cycle_refresh_at = deadline if moment < deadline else None
+                        if deadline <= moment < reset_at:
+                            sample_since = deadline
                 except AuthenticationCircuitOpen:
                     raise
                 except Exception as exc:
@@ -220,7 +238,10 @@ class BackgroundJobs:
                         authentication_circuit=isinstance(exc, AuthenticationCircuitOpen),
                     )
                 try:
-                    sampled = await self.device_sampling.tick()
+                    sampled = (
+                        await self.device_sampling.tick(sample_since=sample_since)
+                        if sample_since is not None else await self.device_sampling.tick()
+                    )
                 except AuthenticationCircuitOpen:
                     raise
                 except Exception as exc:
@@ -234,7 +255,12 @@ class BackgroundJobs:
                     if (cycle is not None and self.device_account_usage is not None
                             and not any(getattr(item, "status", None) == "PENDING" for item in sampled)):
                         try:
-                            await self.device_account_usage.record_estimate(cycle.task_id, expected_cycle_id=cycle.id)
+                            if sample_since is not None:
+                                await self.device_account_usage.record_estimate(
+                                    cycle.task_id, expected_cycle_id=cycle.id, min_snapshot_at=sample_since,
+                                )
+                            else:
+                                await self.device_account_usage.record_estimate(cycle.task_id, expected_cycle_id=cycle.id)
                         except AuthenticationCircuitOpen:
                             raise
                         except Exception as exc:

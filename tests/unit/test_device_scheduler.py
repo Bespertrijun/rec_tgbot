@@ -210,3 +210,48 @@ async def test_retrying_device_sample_preserves_last_saved_estimate():
     await jobs.run_tick()
     jobs.device_account_usage.record_estimate.assert_not_called()
     actions.run_once.assert_awaited_once()
+
+
+@pytest.mark.parametrize("seconds_left,critical", [(61, False), (60, True), (1, True), (0, False)])
+async def test_final_minute_forces_sampling_and_requires_fresh_estimate(seconds_left, critical):
+    from datetime import UTC, datetime, timedelta
+
+    moment = datetime(2026, 10, 17, 9, 59, tzinfo=UTC)
+    reset = moment + timedelta(seconds=seconds_left)
+    deadline = reset - timedelta(minutes=1)
+    jobs, _, cycle, sampling, _ = setup_jobs()
+    cycle.sync.return_value = SimpleNamespace(task_id=1, id=2, reset_at=reset)
+    jobs.device_account_usage = SimpleNamespace(record_estimate=AsyncMock())
+    await jobs.run_tick(now=moment)
+    if critical:
+        sampling.tick.assert_awaited_once_with(sample_since=deadline)
+        jobs.device_account_usage.record_estimate.assert_awaited_once_with(1, expected_cycle_id=2, min_snapshot_at=deadline)
+    else:
+        sampling.tick.assert_awaited_once_with()
+    assert jobs._next_cycle_refresh_at == (deadline if seconds_left > 60 else None)
+
+
+@pytest.mark.parametrize("seconds_until_deadline,expected", [(120, 120), (400, 300), (-1, 0)])
+async def test_loop_shortens_wait_to_final_minute_without_changing_normal_poll(monkeypatch, seconds_until_deadline, expected):
+    from datetime import UTC, datetime, timedelta
+
+    moment = datetime(2026, 10, 17, 9, 57, tzinfo=UTC)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment
+
+    monkeypatch.setattr("reclaude_bot.jobs.scheduler.datetime", Clock)
+    jobs = setup_jobs()[0]
+    jobs._next_cycle_refresh_at = moment + timedelta(seconds=seconds_until_deadline)
+    jobs._run_tick = AsyncMock(return_value=0)
+    delays = []
+
+    async def wait(awaitable, *, timeout):
+        delays.append(timeout)
+        jobs._quota_stop.set()
+        return await awaitable
+
+    monkeypatch.setattr("reclaude_bot.jobs.scheduler.asyncio.wait_for", wait)
+    await jobs._loop()
+    assert delays == [expected]

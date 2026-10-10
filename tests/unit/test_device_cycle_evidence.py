@@ -65,3 +65,22 @@ async def test_valid_cycle_does_not_request_rollover_refresh():
     await service.fetch_fresh_evidence()
     refresh.refresh_if_due.assert_not_awaited()
     source.get_usage.assert_awaited_once_with(178)
+
+
+@pytest.mark.parametrize("seconds_left", [60, 1])
+async def test_final_minute_refreshes_and_rereads_account_bracketed_source(seconds_left):
+    me = MeResponse.model_validate(json.loads((Path(__file__).parents[1] / "fixtures" / "me.json").read_text()))
+    me.weekly_all().resets_at = NOW + timedelta(seconds=seconds_left)
+    fresh = me.model_copy(deep=True)
+    fresh.weekly_all().percent = "95"
+    fresh.current_account.usage_updated_at = NOW
+    source = SimpleNamespace(get_usage=AsyncMock(side_effect=[
+        OrgAccountUsage(org_id=178, account_id="7055", me=me),
+        OrgAccountUsage(org_id=178, account_id="7055", me=fresh),
+    ]))
+    refresh = SimpleNamespace(refresh_if_due=AsyncMock(return_value=False))
+    service = DeviceCycleService(None, source, 178, clock=lambda: NOW, refresh=refresh)
+    evidence = await service.fetch_fresh_evidence()
+    assert evidence.percent == 95
+    refresh.refresh_if_due.assert_awaited_once_with(now=NOW, expired_cycle=False, before_reset_at=me.weekly_all().resets_at)
+    assert source.get_usage.await_count == 2

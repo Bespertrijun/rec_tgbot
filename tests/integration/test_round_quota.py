@@ -260,3 +260,80 @@ async def test_same_source_snapshot_after_restart_cannot_inflate_estimate(lifecy
     app, _ = service(factory, source_usage(percent="100"), clock=lambda: NOW + timedelta(hours=1))
     assert not await app.record_estimate(1, expected_cycle_id=cycle_id)
     assert (await reset_task(runtime(factory))).opening_limit_usd == 575
+
+
+@pytest.mark.parametrize("case", ["fresh", "stale_percent", "stale_device", "missing_device_segment", "expired"])
+async def test_final_minute_estimate_requires_fresh_percent_and_all_active_device_samples(lifecycle_db, case):
+    from tests.integration.test_device_ledger import association
+
+    factory, _ = lifecycle_db
+    cycle_id, aid, _ = await saved_round(factory)
+    reset = NOW + timedelta(days=6)
+    deadline = reset - timedelta(minutes=1)
+    moment = deadline + timedelta(seconds=5)
+    if case != "stale_device":
+        ledger = DeviceLedgerService(factory, 178, clock=lambda: moment)
+        await ledger.apply(aid, cycle_id, await snapshot(factory, "2700", sampled=moment))
+    if case == "missing_device_segment":
+        await association(factory, user_id=2, device_id=44501, started=deadline)
+    if case == "expired":
+        moment = reset
+    sampled_at = deadline - timedelta(seconds=1) if case == "stale_percent" else moment
+    app, _ = service(factory, source_usage(percent="100", reset=reset, sampled_at=sampled_at), clock=lambda: moment)
+    assert await app.record_estimate(1, expected_cycle_id=cycle_id, min_snapshot_at=deadline) is (case == "fresh")
+    async with factory() as session:
+        cycle = await session.get(DeviceQuotaCycle, cycle_id)
+        assert cycle.estimated_total_usd == (2700 if case == "fresh" else 2400)
+
+
+async def test_deadline_tick_refreshes_samples_and_saves_estimate_for_next_round(lifecycle_db):
+    from types import SimpleNamespace
+
+    from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
+    from reclaude_bot.infrastructure.db.models import ServiceState
+    from reclaude_bot.jobs.scheduler import BackgroundJobs
+
+    factory, _ = lifecycle_db
+    old_id, aid, _ = await saved_round(factory)
+    reset = NOW + timedelta(days=6)
+    deadline = reset - timedelta(minutes=1)
+    rt = runtime(factory)
+    rt.clock[0] = deadline
+    rt.gateway.me.return_value = account_snapshot(percent="100", sampled_at=NOW, reset=reset).me
+    calls = []
+
+    async def refresh():
+        calls.append("refresh")
+        rt.gateway.me.return_value = account_snapshot(percent="100", sampled_at=deadline, reset=reset).me
+
+    rt.gateway.refresh_account_usage = AsyncMock(side_effect=refresh)
+    refresh_service = AccountUsageRefreshService(factory, rt.gateway)
+    rt.cycle.refresh = refresh_service
+    # Query refresh happened recently, so ordinary cooldown is still active.
+    async with factory() as session, session.begin():
+        (await session.get(ServiceState, 1)).account_usage_refresh_attempted_at = deadline - timedelta(minutes=2)
+
+    async def sample(*, sample_since):
+        assert sample_since == deadline
+        calls.append("sample")
+        await DeviceLedgerService(factory, 178, clock=lambda: rt.clock[0]).apply(
+            aid, old_id, await snapshot(factory, "2700", sampled=deadline),
+        )
+        return (SimpleNamespace(status="COMPLETED"),)
+
+    usage_service = DeviceAccountUsageService(factory, rt.cycle.source, 178, clock=lambda: rt.clock[0], refresh=refresh_service)
+    jobs = BackgroundJobs(SimpleNamespace(), SimpleNamespace(),
+                          device_cycle=rt.cycle, device_sampling=SimpleNamespace(tick=AsyncMock(side_effect=sample), poll_seconds=300),
+                          device_actions=SimpleNamespace(run_once=AsyncMock(return_value=0)), device_account_usage=usage_service)
+    await jobs.run_tick(now=deadline)
+    assert calls == ["refresh", "sample"]
+    async with factory() as session:
+        previous = await session.get(DeviceQuotaCycle, old_id)
+        assert previous.estimated_total_usd == 2700
+        assert previous.estimate_snapshot_at == deadline
+    rt.clock[0] = reset
+    rt.gateway.me.return_value = account_snapshot(percent="0", sampled_at=reset, reset=reset + timedelta(days=7)).me
+    next_cycle = await rt.cycle.sync()
+    assert next_cycle.quota_source_estimate_usd == 2700
+    assert next_cycle.opening_limit_usd == 650
+    rt.gateway.refresh_account_usage.assert_awaited_once()

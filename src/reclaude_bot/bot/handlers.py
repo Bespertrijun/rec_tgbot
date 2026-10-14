@@ -35,6 +35,7 @@ from reclaude_bot.config import Settings
 from reclaude_bot.domain.errors import DomainError, EligibilityError
 from reclaude_bot.domain.timefmt import format_beijing
 from reclaude_bot.infrastructure.db.models import User
+from reclaude_bot.infrastructure.reclaude.models import RotationQueue
 from reclaude_bot.jobs.scheduler import BackgroundJobs
 
 log = structlog.get_logger(__name__)
@@ -939,6 +940,7 @@ async def _account_inventory_lines(recovery: RecoveryService) -> list[str]:
     listing = await recovery.list_accounts()
     selected = listing.selected_account_id
     lines = [f"当前账号状态：{html.escape(listing.me.current_account.status)}"]
+    lines.extend(_rotation_queue_lines(listing.me.rotation_queue))
     lines.append(f"已选择账号：{html.escape(selected) if selected else '未选择'}")
     if not listing.accounts.items:
         lines.append("实时账号：暂无")
@@ -952,6 +954,20 @@ async def _account_inventory_lines(recovery: RecoveryService) -> list[str]:
         marker = " [当前]" if selected is not None and str(account.account_id).strip() == selected.strip() else ""
         lines.append(f"- {account_id}{marker} | {email} | lifecycle={lifecycle} | health={health}")
     return lines
+
+
+def _rotation_queue_lines(queue: RotationQueue | None) -> list[str]:
+    if queue is None:
+        return []
+    parts = [f"换号队列：{html.escape(queue.status or 'unknown')}"]
+    if queue.position is not None:
+        total = f"/{queue.tier_total}" if queue.tier_total is not None else ""
+        parts.append(f"位置 {queue.position}{total}")
+    if queue.target_plan_tier:
+        parts.append(f"目标 {html.escape(queue.target_plan_tier)}")
+    if queue.task_type:
+        parts.append(f"类型 {html.escape(queue.task_type)}")
+    return [" | ".join(parts)]
 
 
 def _round_quota_lines(limit: Decimal | None, estimate: Decimal | None, reason: str | None) -> list[str]:

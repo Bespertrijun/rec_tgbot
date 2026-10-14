@@ -175,8 +175,19 @@ class UsageSnapshot(StrictModel):
     five_hour: UsageWindow | None = None
 
 
+class RotationQueue(StrictModel):
+    """The platform's replacement queue entry for the current account, if any."""
+
+    status: str | None = None
+    task_type: str | None = None
+    position: int | None = None
+    tier_total: int | None = None
+    target_plan_tier: str | None = None
+
+
 class MeResponse(StrictModel):
     current_account: CurrentAccount
+    rotation_queue: RotationQueue | None = None
 
     def weekly_all(self) -> WeeklyLimit:
         candidates = [item for item in self.current_account.usage_snapshot.limits if item.group == "weekly" and item.kind == "weekly_all" and item.scope is None]

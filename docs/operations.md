@@ -12,7 +12,9 @@ member snapshot; see the [device-ledger rollout gate](device-ledger-rollout.md).
 ## Account and recovery
 
 In an administrator private chat, `/task [name]` reports task state and the live account
-inventory, including account IDs, full emails, lifecycle, and health. `/account [name]`
+inventory, including account IDs, full emails, lifecycle, and health. When the platform
+queues the current account for replacement (for example after a ban), the same output
+adds a `换号队列` line with the queue status, position, and target plan tier. `/account [name]`
 shares the same handler but is open to every user in private chat and appears in the
 public command menu; group invocations are ignored. Account inventory failures do not hide task details. `/status` keeps each
 user's personal device quota separate from the organization account summary; the latter

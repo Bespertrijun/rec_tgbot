@@ -8,7 +8,7 @@ import pytest
 from reclaude_bot.application.device_account_usage import DeviceAccountUsage
 from reclaude_bot.bot.commands import admin_commands, user_commands
 from reclaude_bot.bot.handlers import build_admin_router, build_router
-from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse
+from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse, RotationQueue
 from tests.unit.test_device_command_wiring import command_callbacks, parameters, settings
 
 
@@ -91,7 +91,7 @@ async def test_task_includes_inventory_even_without_tasks(command_name, upstream
     kwargs, deps = parameters(handler, message, "", command_name=command_name)
     deps["task"].list_tasks.return_value = []
     deps["recovery"].list_accounts.return_value = SimpleNamespace(
-        me=SimpleNamespace(current_account=SimpleNamespace(status="bound")), selected_account_id="4949",
+        me=SimpleNamespace(current_account=SimpleNamespace(status="bound"), rotation_queue=None), selected_account_id="4949",
         accounts=AccountsResponse(items=[AccountRecord(account_id=4949, account_email="full<owner>@example.com", lifecycle="bound", health="healthy")]),
     )
     if upstream_fails:
@@ -123,7 +123,7 @@ async def test_account_is_open_to_non_admin_in_private():
     kwargs, deps = parameters(handler, message, "", command_name="account")
     deps["task"].list_tasks.return_value = []
     deps["recovery"].list_accounts.return_value = SimpleNamespace(
-        me=SimpleNamespace(current_account=SimpleNamespace(status="bound")), selected_account_id="4949",
+        me=SimpleNamespace(current_account=SimpleNamespace(status="bound"), rotation_queue=None), selected_account_id="4949",
         accounts=AccountsResponse(items=[AccountRecord(account_id=4949, account_email="owner@example.com", lifecycle="bound", health="healthy")]),
     )
     await handler(**kwargs)
@@ -143,13 +143,47 @@ async def test_task_stays_admin_only_in_private():
     message.answer.assert_not_called()
 
 
+async def test_account_shows_rotation_queue_when_banned_replacement_is_pending():
+    handler = command_callbacks(build_admin_router(settings()))["account"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=55), chat=SimpleNamespace(type="private"), answer=AsyncMock())
+    kwargs, deps = parameters(handler, message, "", command_name="account")
+    deps["task"].list_tasks.return_value = []
+    deps["recovery"].list_accounts.return_value = SimpleNamespace(
+        me=SimpleNamespace(
+            current_account=SimpleNamespace(status="banned"),
+            rotation_queue=RotationQueue(status="pending", task_type="banned", position=126, tier_total=148, target_plan_tier="max_20x"),
+        ),
+        selected_account_id="4949",
+        accounts=AccountsResponse(items=[AccountRecord(account_id=4949, account_email="owner@example.com", lifecycle="bound", health="banned")]),
+    )
+    await handler(**kwargs)
+    text = "\n".join(call.args[0] for call in message.answer.await_args_list)
+    assert "当前账号状态：banned" in text
+    assert "换号队列：pending | 位置 126/148 | 目标 max_20x | 类型 banned" in text
+
+
+async def test_account_omits_rotation_queue_line_when_absent():
+    handler = command_callbacks(build_admin_router(settings()))["account"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=55), chat=SimpleNamespace(type="private"), answer=AsyncMock())
+    kwargs, deps = parameters(handler, message, "", command_name="account")
+    deps["task"].list_tasks.return_value = []
+    deps["recovery"].list_accounts.return_value = SimpleNamespace(
+        me=SimpleNamespace(current_account=SimpleNamespace(status="bound"), rotation_queue=None),
+        selected_account_id="4949",
+        accounts=AccountsResponse(items=[AccountRecord(account_id=4949, account_email="owner@example.com", lifecycle="bound", health="healthy")]),
+    )
+    await handler(**kwargs)
+    text = "\n".join(call.args[0] for call in message.answer.await_args_list)
+    assert "换号队列" not in text
+
+
 async def test_large_inventory_is_split_without_losing_accounts():
     handler = command_callbacks(build_admin_router(settings()))["task"]
     message = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type="private"), answer=AsyncMock())
     kwargs, deps = parameters(handler, message, "")
     deps["task"].list_tasks.return_value = []
     deps["recovery"].list_accounts.return_value = SimpleNamespace(
-        me=SimpleNamespace(current_account=SimpleNamespace(status="bound")), selected_account_id=None,
+        me=SimpleNamespace(current_account=SimpleNamespace(status="bound"), rotation_queue=None), selected_account_id=None,
         accounts=AccountsResponse(items=[AccountRecord(account_id=i + 1, account_email=f"owner{i}@example.com", lifecycle="bound", health="healthy") for i in range(150)]),
     )
     await handler(**kwargs)

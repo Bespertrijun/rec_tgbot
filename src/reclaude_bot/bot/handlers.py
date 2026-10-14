@@ -550,7 +550,9 @@ def build_admin_router(settings: Settings) -> Router:
         device_cycle: DeviceCycleService,
         recovery: RecoveryService,
     ) -> None:
-        if not is_admin(message) or message.chat.type != "private":
+        # /account is open to every user in private chat; /task stays admin-only.
+        invoked = (getattr(command, "command", "") or "").strip().casefold()
+        if message.chat.type != "private" or (invoked != "account" and not is_admin(message)):
             return
         try:
             name_arg = (command.args or "").strip() or None

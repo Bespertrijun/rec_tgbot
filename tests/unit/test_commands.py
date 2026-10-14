@@ -24,7 +24,7 @@ async def test_register_command_menus_sets_public_and_admin_scopes() -> None:
     calls = bot.set_my_commands.await_args_list
 
     assert isinstance(calls[0].kwargs["scope"], BotCommandScopeDefault)
-    public = {"start", "bind", "status", "auth", "deauth", "send"}
+    public = {"start", "bind", "status", "account", "auth", "deauth", "send"}
     admin = {"sync", "member", "setquota", "ban", "unban", "unbind", "device", "authuser", "deauthuser", "audit", "groups",
              "newtask", "deltatask", "task", "starttask", "stoptask", "startstats", "stopstats", "addtaskmember",
              "deletetaskmember", "settaskquota", "taskusers", "update", "recovery_enable", "reset"}

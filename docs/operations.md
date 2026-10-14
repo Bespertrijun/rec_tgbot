@@ -13,8 +13,8 @@ member snapshot; see the [device-ledger rollout gate](device-ledger-rollout.md).
 
 In an administrator private chat, `/task [name]` reports task state and the live account
 inventory, including account IDs, full emails, lifecycle, and health. `/account [name]`
-remains a compatibility alias to the same handler and is no longer shown as a standalone
-menu item. Account inventory failures do not hide task details. `/status` keeps each
+shares the same handler but is open to every user in private chat and appears in the
+public command menu; group invocations are ignored. Account inventory failures do not hide task details. `/status` keeps each
 user's personal device quota separate from the organization account summary; the latter
 contains only the masked current account email, bound status, 5-hour and 7-day windows,
 reset times, managed-device estimate, and snapshot time. The `/me` lookup is scoped to
@@ -30,7 +30,7 @@ resumes only after the reset succeeds. An ambiguous or failed inventory leaves t
 identity and history intact and retries with writes closed.
 
 A `401` forces all quota tasks to STOPPED and closes the write latch. After repairing the
-dedicated session, run `/task` (or the compatibility alias `/account`), verify the
+dedicated session, run `/task` (or `/account`), verify the
 persisted account, and explicitly start only the tasks that should resume.
 `/recovery_enable` rechecks the live bound account and leaves all tasks STOPPED. Normal
 API calls do not silently retry password login.

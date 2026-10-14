@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from reclaude_bot.application.device_account_usage import DeviceAccountUsage
-from reclaude_bot.bot.commands import admin_commands
+from reclaude_bot.bot.commands import admin_commands, user_commands
 from reclaude_bot.bot.handlers import build_admin_router, build_router
 from reclaude_bot.infrastructure.reclaude.models import AccountRecord, AccountsResponse
 from tests.unit.test_device_command_wiring import command_callbacks, parameters, settings
@@ -22,9 +22,9 @@ def account_summary():
     )
 
 
-def test_standalone_account_menu_removed():
-    commands = {item.command for item in admin_commands()}
-    assert "account" not in commands
+def test_account_menu_is_open_to_all_users():
+    assert "account" in {item.command for item in user_commands()}
+    assert "account" in {item.command for item in admin_commands()}
 
 
 def test_manual_selection_removed():
@@ -36,7 +36,7 @@ def test_manual_selection_removed():
 async def test_task_inventory_is_admin_private_only(chat_type, user_id):
     handler = command_callbacks(build_admin_router(settings()))["task"]
     message = SimpleNamespace(from_user=SimpleNamespace(id=user_id), chat=SimpleNamespace(type=chat_type), answer=AsyncMock())
-    kwargs, deps = parameters(handler, message, "")
+    kwargs, deps = parameters(handler, message, "", command_name="task")
     await handler(**kwargs)
     for dep in deps.values():
         assert not dep.mock_calls
@@ -88,7 +88,7 @@ async def test_unbound_user_cannot_query_account_summary(monkeypatch):
 async def test_task_includes_inventory_even_without_tasks(command_name, upstream_fails):
     handler = command_callbacks(build_admin_router(settings()))[command_name]
     message = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type="private"), answer=AsyncMock())
-    kwargs, deps = parameters(handler, message, "")
+    kwargs, deps = parameters(handler, message, "", command_name=command_name)
     deps["task"].list_tasks.return_value = []
     deps["recovery"].list_accounts.return_value = SimpleNamespace(
         me=SimpleNamespace(current_account=SimpleNamespace(status="bound")), selected_account_id="4949",
@@ -111,10 +111,36 @@ async def test_account_alias_reuses_task_and_cannot_expose_inventory_in_groups()
     callbacks = command_callbacks(build_admin_router(settings()))
     assert callbacks["account"] is callbacks["task"]
     message = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=SimpleNamespace(type="supergroup"), answer=AsyncMock())
-    kwargs, deps = parameters(callbacks["account"], message, "")
+    kwargs, deps = parameters(callbacks["account"], message, "", command_name="account")
     await callbacks["account"](**kwargs)
     for dep in deps.values():
         assert not dep.mock_calls
+
+
+async def test_account_is_open_to_non_admin_in_private():
+    handler = command_callbacks(build_admin_router(settings()))["account"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=55), chat=SimpleNamespace(type="private"), answer=AsyncMock())
+    kwargs, deps = parameters(handler, message, "", command_name="account")
+    deps["task"].list_tasks.return_value = []
+    deps["recovery"].list_accounts.return_value = SimpleNamespace(
+        me=SimpleNamespace(current_account=SimpleNamespace(status="bound")), selected_account_id="4949",
+        accounts=AccountsResponse(items=[AccountRecord(account_id=4949, account_email="owner@example.com", lifecycle="bound", health="healthy")]),
+    )
+    await handler(**kwargs)
+    deps["task"].list_tasks.assert_awaited_once()
+    deps["recovery"].list_accounts.assert_awaited_once()
+    text = "\n".join(call.args[0] for call in message.answer.await_args_list)
+    assert "owner@example.com" in text and "4949" in text
+
+
+async def test_task_stays_admin_only_in_private():
+    handler = command_callbacks(build_admin_router(settings()))["task"]
+    message = SimpleNamespace(from_user=SimpleNamespace(id=55), chat=SimpleNamespace(type="private"), answer=AsyncMock())
+    kwargs, deps = parameters(handler, message, "", command_name="task")
+    await handler(**kwargs)
+    for dep in deps.values():
+        assert not dep.mock_calls
+    message.answer.assert_not_called()
 
 
 async def test_large_inventory_is_split_without_losing_accounts():

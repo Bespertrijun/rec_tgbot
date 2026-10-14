@@ -16,6 +16,7 @@ _USER_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "开始使用"),
     ("bind", "绑定邮箱（需要参数）"),
     ("status", "查看额度状态"),
+    ("account", "查看任务与账号状态"),
     ("auth", "使用 Reclaude 授权链接授权设备"),
     ("deauth", "撤销本人设备"),
     ("send", "群内转账额度给其他用户"),

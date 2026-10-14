@@ -41,8 +41,8 @@ def test_new_device_commands_and_existing_commands_remain_registered():
     assert expected_user | (expected_admin - {"account"}) <= {entry.command for entry in admin_commands()}
 
 
-def parameters(callback, message, args):
-    provided = {"message": message, "command": SimpleNamespace(args=args)}
+def parameters(callback, message, args, command_name=None):
+    provided = {"message": message, "command": SimpleNamespace(args=args, command=command_name)}
     deps = {}
     for name in inspect.signature(callback).parameters:
         if name not in provided:

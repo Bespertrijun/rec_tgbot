@@ -553,6 +553,16 @@ class DeviceUsageSegment(Base):
             name="ck_device_usage_segments_latest_range",
         ),
         CheckConstraint(
+            "baseline_fable_usd IS NULL OR (baseline_total_usd IS NOT NULL AND "
+            "baseline_fable_usd >= 0 AND baseline_fable_usd <= baseline_total_usd)",
+            name="ck_device_usage_segments_baseline_fable_range",
+        ),
+        CheckConstraint(
+            "latest_fable_usd IS NULL OR (latest_total_usd IS NOT NULL AND "
+            "latest_fable_usd >= 0 AND latest_fable_usd <= latest_total_usd)",
+            name="ck_device_usage_segments_latest_fable_range",
+        ),
+        CheckConstraint(
             "confirmed_used_usd IS NULL OR "
             "(confirmed_used_usd >= 0 AND confirmed_used_usd < 100000000)",
             name="ck_device_usage_segments_confirmed_used_range",
@@ -579,8 +589,12 @@ class DeviceUsageSegment(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     baseline_total_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    baseline_fable_usd: Mapped[Decimal | None] = mapped_column(MONEY)
     baseline_captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     latest_total_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    latest_fable_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+    billing_valid: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    billing_invalid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     latest_sampled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_used_usd: Mapped[Decimal | None] = mapped_column(MONEY)
     imported_used_usd: Mapped[Decimal | None] = mapped_column(MONEY)

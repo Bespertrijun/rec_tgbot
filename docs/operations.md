@@ -106,6 +106,31 @@ allows final-24-hour authorization and exempts automatic quota deauth. The bot s
 durable `/auth` notice only while the user remains bound, active, and in the current task
 scope.
 
+Device quotas use subscription-equivalent dollars: all `claude-fable-*` models
+(and the `claude-fable` family name) count at twice REC's API amount; other models
+count at their API amount. Each segment charges the change in the API total plus
+the change in its Fable subtotal. Both are captured at import/reset, so usage from
+before the baseline is excluded. Explicit `--used` amounts are already confirmed
+quota spend and are not multiplied. REC snapshots retain their original API totals
+and complete model payloads for reconciliation. Nonzero samples require a complete
+`models.breakdown` whose amounts reconcile exactly with `overview.total_usd`.
+
+Migration `0019_fable_billing` corrects the current round, including ended device
+associations, using archived snapshots matched by organization, device, `all` range,
+timestamp, and API amount. Missing or conflicting evidence preserves the previous
+confirmed spend and marks the ledger for review; it is never treated as zero Fable
+usage. Such incomplete billing cannot produce an account-capacity estimate. Earlier
+rounds' ledger amounts are retained; late samples for an earlier round without Fable
+baselines require review. Old capacity estimates are invalidated and rebuilt by
+normal sampling. Existing task limits, adjustments, transfers, locks, and explicit
+import amounts keep their nominal values; the next round uses the corrected estimate.
+The upgrade can therefore bring a user to their existing quota threshold.
+
+Before upgrading, retain a database backup. Once Fable endpoint data is recorded,
+the migration refuses a schema-only downgrade, which would mix corrected balances
+with the old accounting formula. Restore the matching pre-upgrade backup and code
+when rolling back this billing change.
+
 ## Incident records
 
 stdout contains JSON structlog events with request/job IDs and no Cookies, full emails,

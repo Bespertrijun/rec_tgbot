@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.account_usage_refresh import AccountUsageRefreshService
@@ -321,6 +321,32 @@ class DeviceAccountUsageService:
         moment: datetime,
     ) -> Decimal | None:
         del moment
+        incomplete_billing = await session.scalar(
+            select(DeviceUsageSegment.id)
+            .join(DeviceCycleLedger, DeviceCycleLedger.id == DeviceUsageSegment.ledger_id)
+            .where(
+                DeviceCycleLedger.cycle_id == cycle.id,
+                DeviceCycleLedger.task_id == cycle.task_id,
+                (DeviceUsageSegment.confirmed_used_usd.is_not(None) | (DeviceUsageSegment.quality == "NEEDS_REVIEW")),
+                (DeviceUsageSegment.baseline_fable_usd.is_(None) | DeviceUsageSegment.latest_fable_usd.is_(None)
+                 | DeviceUsageSegment.billing_valid.is_(False)),
+            )
+            .limit(1)
+        )
+        if incomplete_billing is not None:
+            return None
+        segment_total = select(func.sum(DeviceUsageSegment.confirmed_used_usd)).where(
+            DeviceUsageSegment.ledger_id == DeviceCycleLedger.id,
+        ).scalar_subquery()
+        unreconciled_spend = await session.scalar(
+            select(DeviceCycleLedger.id).where(
+                DeviceCycleLedger.cycle_id == cycle.id,
+                DeviceCycleLedger.task_id == cycle.task_id,
+                DeviceCycleLedger.confirmed_used_usd > func.coalesce(segment_total, _ZERO),
+            ).limit(1)
+        )
+        if unreconciled_spend is not None:
+            return None
         values = list(
             (
                 await session.scalars(

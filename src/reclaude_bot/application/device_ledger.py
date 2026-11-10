@@ -9,6 +9,7 @@ from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import audit, utcnow
+from reclaude_bot.domain.billing import fable_total_usd
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import ensure_utc
 from reclaude_bot.infrastructure.db.models import (
@@ -122,6 +123,7 @@ class DeviceLedgerService:
         )
         sampled_at = ensure_utc(snapshot.sampled_at)
         baseline = self._stored_money(snapshot.total_usd)
+        baseline_fable = self._snapshot_fable(snapshot)
         if (
             context.cycle.status != "VERIFIED"
             or not context.cycle_started_at <= now < context.reset_at
@@ -146,8 +148,11 @@ class DeviceLedgerService:
             raise EligibilityError("重置周期已存在设备账本，不能覆盖")
 
         segment.baseline_total_usd = baseline
+        segment.baseline_fable_usd = baseline_fable
         segment.baseline_captured_at = sampled_at
         segment.latest_total_usd = baseline
+        segment.latest_fable_usd = baseline_fable
+        segment.billing_valid = True
         segment.latest_sampled_at = sampled_at
         segment.confirmed_used_usd = _ZERO
         segment.imported_used_usd = _ZERO
@@ -261,6 +266,7 @@ class DeviceLedgerService:
         self._validate_id(operator_id, "管理员 ID")
         imported = self._stored_money(imported_used_usd)
         baseline = self._stored_money(snapshot.total_usd)
+        baseline_fable = self._snapshot_fable(snapshot)
         now = self._now()
 
         association = await session.scalar(
@@ -363,8 +369,11 @@ class DeviceLedgerService:
             started_at=ensure_utc(association.started_at),
             ended_at=None,
             baseline_total_usd=baseline,
+            baseline_fable_usd=baseline_fable,
             baseline_captured_at=ensure_utc(snapshot.sampled_at),
             latest_total_usd=baseline,
+            latest_fable_usd=baseline_fable,
+            billing_valid=True,
             latest_sampled_at=ensure_utc(snapshot.sampled_at),
             confirmed_used_usd=imported,
             imported_used_usd=imported,
@@ -537,6 +546,7 @@ class DeviceLedgerService:
                 started_at=context.segment_started_at,
                 ended_at=self._segment_end(context),
                 baseline_total_usd=_ZERO if known_zero_origin else None,
+                baseline_fable_usd=_ZERO if known_zero_origin else None,
                 baseline_captured_at=context.association_started_at if known_zero_origin else None,
                 latest_total_usd=None,
                 latest_sampled_at=None,
@@ -675,6 +685,10 @@ class DeviceLedgerService:
             if calculated is None or calculated < previous_amount:
                 calculated = previous_amount
                 review_needed = True
+                # A stored balance above its component totals is an accounting
+                # discrepancy, not merely an unsampled replacement device.
+                for segment in segments:
+                    segment.quality = "NEEDS_REVIEW"
 
         if review_needed:
             quality = "NEEDS_REVIEW"
@@ -801,13 +815,26 @@ class DeviceLedgerService:
         current_at = ensure_utc(segment.latest_sampled_at) if segment.latest_sampled_at is not None else None
         if current_at is not None and sampled_at < current_at:
             return False
+        if segment.billing_invalid_at is not None and sampled_at <= ensure_utc(segment.billing_invalid_at):
+            return False
+        try:
+            fable = self._snapshot_fable(snapshot)
+        except EligibilityError:
+            # Keep confirmed spend, but do not use incomplete billing in estimates.
+            self._invalidate_billing(segment, sampled_at)
+            return True
         if current_at is not None and sampled_at == current_at:
-            if segment.latest_total_usd == total:
+            if segment.latest_total_usd == total and segment.latest_fable_usd == fable:
                 return False
-            if segment.quality != "NEEDS_REVIEW":
-                segment.quality = "NEEDS_REVIEW"
+            if segment.quality != "NEEDS_REVIEW" or segment.billing_valid:
+                self._invalidate_billing(segment, sampled_at)
                 return True
             return False
+
+        if ((segment.latest_total_usd is not None and total < segment.latest_total_usd)
+                or (segment.latest_fable_usd is not None and fable < segment.latest_fable_usd)):
+            self._invalidate_billing(segment, sampled_at)
+            return True
 
         previous = (
             self._stored_money(segment.confirmed_used_usd)
@@ -825,21 +852,37 @@ class DeviceLedgerService:
             else None
         )
 
-        segment.latest_total_usd = total
-        segment.latest_sampled_at = sampled_at
-
         if baseline is None:
             segment.baseline_total_usd = total
+            segment.baseline_fable_usd = fable
             segment.baseline_captured_at = sampled_at
+            segment.latest_total_usd = total
+            segment.latest_fable_usd = fable
+            segment.latest_sampled_at = sampled_at
+            segment.billing_valid = True
+            segment.billing_invalid_at = None
             segment.confirmed_used_usd = _ZERO
             segment.quality = "NEEDS_REVIEW"
             return True
 
-        candidate = imported + total - baseline
-        if candidate < 0 or (previous is not None and candidate < previous):
-            segment.quality = "NEEDS_REVIEW"
+        if segment.baseline_fable_usd is None:
+            self._invalidate_billing(segment, sampled_at)
             return True
 
+        fable_delta = fable - self._stored_money(segment.baseline_fable_usd)
+        candidate = imported + total - baseline + fable_delta
+        if fable_delta < 0 or candidate >= _MONEY_LIMIT:
+            self._invalidate_billing(segment, sampled_at)
+            return True
+        if candidate < 0 or (previous is not None and candidate < previous):
+            self._invalidate_billing(segment, sampled_at)
+            return True
+
+        segment.latest_total_usd = total
+        segment.latest_fable_usd = fable
+        segment.latest_sampled_at = sampled_at
+        segment.billing_valid = True
+        segment.billing_invalid_at = None
         if previous is None or candidate > previous:
             segment.confirmed_used_usd = candidate
 
@@ -849,6 +892,22 @@ class DeviceLedgerService:
         elif segment.quality != "NEEDS_REVIEW":
             segment.quality = "NEEDS_REVIEW"
         return True
+
+    @staticmethod
+    def _invalidate_billing(segment: DeviceUsageSegment, sampled_at: datetime) -> None:
+        segment.quality = "NEEDS_REVIEW"
+        segment.billing_valid = False
+        segment.billing_invalid_at = sampled_at
+
+    @staticmethod
+    def _snapshot_fable(snapshot: DeviceUsageSnapshot) -> Decimal:
+        try:
+            payload = snapshot.payload
+            if payload.get("range") != snapshot.range or Decimal(str(payload["overview"]["total_usd"])) != snapshot.total_usd:
+                raise ValueError("snapshot aggregate mismatch")
+            return fable_total_usd(snapshot.total_usd, payload.get("models"))
+        except (AttributeError, KeyError, TypeError, ValueError, ArithmeticError):
+            raise EligibilityError("设备模型用量明细缺失或不完整，无法核实 fable 计费") from None
 
     async def _write_audit(
         self,

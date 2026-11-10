@@ -125,6 +125,11 @@ async def schema_diff(url, *, include_c3=True, include_d2=True, include_import=T
             def compare(sync_connection):
                 def include(obj, name, kind, reflected, compare_to):
                     if not (include_c3 and include_d2 and include_import and include_reset_notices) and name in {
+                        "baseline_fable_usd", "latest_fable_usd", "billing_valid", "billing_invalid_at",
+                        "ck_device_usage_segments_baseline_fable_range", "ck_device_usage_segments_latest_fable_range",
+                    }:
+                        return False
+                    if not (include_c3 and include_d2 and include_import and include_reset_notices) and name in {
                         "estimated_total_usd", "estimate_used_usd", "estimate_percent", "estimate_snapshot_at", "estimate_recorded_at",
                         "estimate_blocked", "opening_limit_usd", "quota_source_cycle_id", "quota_source_estimate_usd", "quota_reason", "fk_cycle_quota_source",
                     }:

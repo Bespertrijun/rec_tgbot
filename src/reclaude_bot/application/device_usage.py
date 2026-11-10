@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from reclaude_bot.application.audit import utcnow
+from reclaude_bot.domain.billing import fable_total_usd
 from reclaude_bot.domain.errors import AuthenticationCircuitOpen, EligibilityError
 from reclaude_bot.domain.quota import ensure_utc
 from reclaude_bot.infrastructure.db.models import (
@@ -328,6 +329,7 @@ class DeviceUsageCollector:
         normalized = total.quantize(_MONEY_QUANTUM)
         if normalized != total:
             raise ValueError("usage total exceeds storage precision")
+        fable_total_usd(total, usage.models)
         payload = usage.model_dump(mode="json")
         if not isinstance(payload, dict):
             raise ValueError("invalid usage payload")

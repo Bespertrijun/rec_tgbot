@@ -62,7 +62,8 @@ async def snapshot(factory, total, *, sampled=NOW + timedelta(minutes=1), device
     async with factory.begin() as session:
         row = DeviceUsageSnapshot(org_id=org_id, device_id=device_id, sample_key=uuid4().hex, range=range,
                                   total_usd=Decimal(total), sampled_at=sampled,
-                                  payload={"range": range, "overview": {"total_usd": total}})
+                                  payload={"range": range, "overview": {"total_usd": total},
+                                           "models": {"breakdown": [{"model": "claude-opus-5-5", "total_usd": total}]}})
         session.add(row)
         await session.flush()
         return row.id

@@ -21,7 +21,8 @@ NOW = datetime(2026, 9, 28, tzinfo=UTC)
 
 def usage(total="12.3456789012", *, range="all"):
     return DeviceUsage(range=range, overview=DeviceUsageOverview(total_usd=total, messages=42,
-                       heatmap=[{"date": "2026-09-28", "total_usd": total}]), models={"breakdown": []})
+                       heatmap=[{"date": "2026-09-28", "total_usd": total}]),
+                       models={"breakdown": [{"model": "claude-opus-5-5", "total_usd": total}]})
 
 
 async def associated(factory, *, user_id=1, device_id=44500, org_id=178, task_id=1, state="ACTIVE", auth_status="SUCCEEDED"):

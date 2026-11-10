@@ -16,6 +16,7 @@ from reclaude_bot.application.device_context import SingleOrgTaskService
 from reclaude_bot.application.device_cycle import DeviceCycleEvidence, DeviceCycleService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.application.device_round_quota import apply_round_quota, round_quota_summary
+from reclaude_bot.domain.billing import fable_total_usd
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import CLOCK_SKEW_TOLERANCE, ensure_utc, is_last_24h, same_cycle_reset
 from reclaude_bot.domain.timefmt import format_beijing
@@ -620,6 +621,10 @@ class DeviceTaskResetService:
             raise EligibilityError("设备基线用量精度无效") from None
         if normalized != total:
             raise EligibilityError("设备基线用量最多支持 10 位小数")
+        try:
+            fable_total_usd(total, usage.models)
+        except ValueError:
+            raise EligibilityError("设备模型用量明细缺失或不完整，无法核实 fable 计费") from None
         payload = usage.model_dump(mode="json")
         if not isinstance(payload, dict):
             raise EligibilityError("设备基线用量内容无效")

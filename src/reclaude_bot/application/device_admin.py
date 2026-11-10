@@ -16,6 +16,7 @@ from reclaude_bot.application.device import DeviceAuthorizationResult, DeviceAut
 from reclaude_bot.application.device_context import DeviceTaskContext, SingleOrgTaskService
 from reclaude_bot.application.device_ledger import DeviceLedgerService
 from reclaude_bot.application.device_sampling import SamplingCallback, invoke_sampling_callback
+from reclaude_bot.domain.billing import fable_total_usd
 from reclaude_bot.domain.enums import TaskStatus
 from reclaude_bot.domain.errors import EligibilityError
 from reclaude_bot.domain.quota import as_decimal, ensure_utc
@@ -664,6 +665,10 @@ class DeviceAdminService:
             raise EligibilityError("设备基线用量精度无效") from None
         if normalized != total:
             raise EligibilityError("设备基线用量最多支持 10 位小数")
+        try:
+            fable_total_usd(total, usage.models)
+        except ValueError:
+            raise EligibilityError("设备模型用量明细缺失或不完整，无法核实 fable 计费") from None
         payload = usage.model_dump(mode="json")
         if not isinstance(payload, dict):
             raise EligibilityError("设备基线用量内容无效")
